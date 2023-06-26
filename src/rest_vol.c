@@ -1390,6 +1390,67 @@ done:
 } /* end H5_rest_curl_write_data_callback() */
 
 /*-------------------------------------------------------------------------
+ * Function:    H5_rest_curl_write_data_callback_no_global
+ *
+ * Purpose:     A callback for cURL which allows cURL to write its
+ *              responses from the server into a growing string buffer
+ *              which is processed by this VOL connector after each server
+ *              interaction.
+ *
+ *              This callback use userp to find a buffer to write to, instead
+ *              of using the global buffer. This allows it to safely be used by
+ *              multiple curl handles at the same time.
+ *
+ * Return:      Amount of bytes equal to the amount given to this callback
+ *              by cURL on success/differing amount of bytes on failure
+ *
+ * Programmer:  Matthew Larson
+ *              June, 2023
+ */
+size_t
+H5_rest_curl_write_data_callback_no_global(char *buffer, size_t size, size_t nmemb, void *userp)
+{
+    ptrdiff_t               buf_ptrdiff;
+    size_t                  data_size             = size * nmemb;
+    size_t                  ret_value             = 0;
+    struct response_buffer *local_response_buffer = (struct response_buffer *)userp;
+
+    /* If the server response is larger than the currently allocated amount for the
+     * response buffer, grow the response buffer by a factor of 2
+     */
+    buf_ptrdiff = (local_response_buffer->curr_buf_ptr + data_size) - local_response_buffer->buffer;
+    if (buf_ptrdiff < 0)
+        FUNC_GOTO_ERROR(
+            H5E_INTERNAL, H5E_BADVALUE, 0,
+            "unsafe cast: response buffer pointer difference was negative - this should not happen!");
+
+    /* Avoid using the 'CHECKED_REALLOC' macro here because we don't necessarily
+     * want to free the connector's response buffer if the reallocation fails.
+     */
+    while ((size_t)(buf_ptrdiff + 1) > local_response_buffer->buffer_size) {
+        char *tmp_realloc;
+
+        if (NULL == (tmp_realloc = (char *)RV_realloc(local_response_buffer->buffer,
+                                                      2 * local_response_buffer->buffer_size)))
+            FUNC_GOTO_ERROR(H5E_RESOURCE, H5E_CANTALLOC, 0, "can't reallocate space for response buffer");
+
+        local_response_buffer->curr_buf_ptr =
+            tmp_realloc + (local_response_buffer->curr_buf_ptr - local_response_buffer->buffer);
+        local_response_buffer->buffer = tmp_realloc;
+        local_response_buffer->buffer_size *= 2;
+    } /* end while */
+
+    memcpy(local_response_buffer->curr_buf_ptr, buffer, data_size);
+    local_response_buffer->curr_buf_ptr += data_size;
+    *local_response_buffer->curr_buf_ptr = '\0';
+
+    ret_value = data_size;
+
+done:
+    return ret_value;
+} /* end H5_rest_curl_write_data_callback_no_global() */
+
+/*-------------------------------------------------------------------------
  * Function:    H5_rest_basename
  *
  * Purpose:     A portable implementation of the basename routine which
@@ -3396,6 +3457,7 @@ done:
 
     return ret_value;
 }
+
 /*************************************************
  * The following two routines allow the REST VOL *
  * connector to be dynamically loaded by HDF5.   *

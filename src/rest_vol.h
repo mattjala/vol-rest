@@ -192,9 +192,83 @@
 #define CURL_PERFORM_NO_ERR(curl_ptr, ret_value)                                                             \
     CURL_PERFORM_INTERNAL(curl_ptr, FALSE, H5E_NONE_MAJOR, H5E_NONE_MINOR, ret_value)
 
-/* Helper macro to find the matching JSON '}' symbol for a given '{' symbol. This macro is
- * used to extract out all of the JSON within a JSON object so that processing can be done
- * on it.
+/* Counterpart of CURL_PERFORM that takes a response_buffer argument,
+ * instead of using the global response buffer.
+ * Currently not used. */
+#define CURL_PERFORM_NO_GLOBAL(curl_ptr, local_response_buffer, ERR_MAJOR, ERR_MINOR, ret_value)             \
+    CURL_PERFORM_INTERNAL_NO_GLOBAL(curl_ptr, response_buffer, TRUE, ERR_MAJOR, ERR_MINOR, ret_value)
+
+#define CURL_PERFORM_INTERNAL_NO_GLOBAL(curl_ptr, local_response_buffer, handle_HTTP_response, ERR_MAJOR,    \
+                                        ERR_MINOR, ret_value)                                                \
+    do {                                                                                                     \
+        CURLcode result = curl_easy_perform(curl_ptr);                                                       \
+                                                                                                             \
+        /* Reset the cURL response buffer write position pointer */                                          \
+        local_response_buffer.curr_buf_ptr = local_response_buffer.buffer;                                   \
+                                                                                                             \
+        if (CURLE_OK != result)                                                                              \
+            FUNC_GOTO_ERROR(ERR_MAJOR, ERR_MINOR, ret_value, "%s", curl_easy_strerror(result));              \
+                                                                                                             \
+        if (handle_HTTP_response) {                                                                          \
+            long response_code;                                                                              \
+                                                                                                             \
+            if (CURLE_OK != curl_easy_getinfo(curl_ptr, CURLINFO_RESPONSE_CODE, &response_code))             \
+                FUNC_GOTO_ERROR(ERR_MAJOR, ERR_MINOR, ret_value, "can't get HTTP response code");            \
+                                                                                                             \
+            HANDLE_RESPONSE(response_code, ERR_MAJOR, ERR_MINOR, ret_value);                                 \
+        } /* end if */                                                                                       \
+    } while (0)
+
+/* TODO - Make this a macro agian*/
+herr_t curl_multi_perform_x(CURL *curl_multi_ptr, CURL **original_handles, size_t count);
+
+/* Counterpart of CURL_PERFORM that takes a curl multi handle,
+ * and waits until all requests on it have finished before returning. */
+
+#define CURL_MULTI_PERFORM(curl_multi_ptr, ERROR_MAJOR, ERR_MINOR, ret_value)                                \
+    int      still_running = 0;                                                                              \
+    CURLMsg *curl_mult_msg = NULL;                                                                           \
+                                                                                                             \
+    do {                                                                                                     \
+        fprintf(stderr, "%zu transfers still running\n", still_running);                                     \
+        fprintf(stderr, "Performing...");                                                                    \
+        if (CURLM_OK != curl_multi_perform(curl_multi_ptr, &still_running))                                  \
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, ret_value, "cURL multi perform error");             \
+                                                                                                             \
+        if (still_running)                                                                                   \
+            /* wait for activity, timeout or "nothing"  */                                                   \
+            fprintf(stderr, "Polling...");                                                                   \
+        if (CURLM_OK != curl_multi_poll(curl_multi_ptr, NULL, 0, 1000, NULL))                                \
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, ret_value, "cURL multi poll error");                \
+                                                                                                             \
+        do {                                                                                                 \
+            long response_code;                                                                              \
+            int  msgq = 0;                                                                                   \
+            fprintf(stderr, "Reading info...");                                                              \
+            curl_mult_msg = curl_multi_info_read(curl_multi_ptr, &msgq);                                     \
+            if (curl_mult_msg && (curl_mult_msg->msg == CURLMSG_DONE)) {                                     \
+                if (CURLE_OK !=                                                                              \
+                    curl_easy_getinfo(curl_mult_msg->easy_handle, CURLINFO_RESPONSE_CODE, &response_code))   \
+                    FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, ret_value, "can't get HTTP response code"); \
+                                                                                                             \
+                /* TODO: Gracefully handle 503 Error, which can result from sending too many simultaneous    \
+                 * requests               */                                                                 \
+                if (response_code == 503) {                                                                  \
+                    fprintf(stderr, "-> 503 Received from macro \n");                                        \
+                }                                                                                            \
+                else {                                                                                       \
+                    fprintf(stderr, "Response code = %ld\n", response_code);                                 \
+                    HANDLE_RESPONSE(response_code, H5E_DATASET, H5E_WRITEERROR, ret_value);                  \
+                }                                                                                            \
+            }                                                                                                \
+        } while (curl_mult_msg);                                                                             \
+                                                                                                             \
+    } while (still_running);                                                                                 \
+    \                                                                                                  
+
+/* Helper macro to find the matching JSON '}' symbol for a given '{' symbol. This macro is                   \
+ * used to extract out all of the JSON within a JSON object so that processing can be done                   \
+ * on it.                                                                                                    \
  */
 #define FIND_JSON_SECTION_END(start_ptr, end_ptr, ERR_MAJOR, ret_value)                                      \
     do {                                                                                                     \
@@ -364,7 +438,7 @@ extern const char *link_class_keys2[];
 /* JSON key to retrieve the version of server from a request to a file. */
 extern const char *server_version_keys[];
 
-/* A global struct containing the buffer which cURL will write its
+/* A struct containing the buffer which cURL will write its
  * responses out to after making a call to the server. The buffer
  * in this struct is allocated upon connector initialization and is
  * dynamically grown as needed throughout the lifetime of the connector.
@@ -577,6 +651,8 @@ herr_t RV_convert_dataspace_shape_to_JSON(hid_t space_id, char **shape_body, cha
 /* Helper functions to base64 encode/decode a binary buffer */
 herr_t RV_base64_encode(const void *in, size_t in_size, char **out, size_t *out_size);
 herr_t RV_base64_decode(const char *in, size_t in_size, char **out, size_t *out_size);
+
+size_t H5_rest_curl_write_data_callback_no_global(char *buffer, size_t size, size_t nmemb, void *userp);
 
 /* HSDS version 0.8.0 introduced support for server-side following of symbolic links
  * If the server is an earlier version, do it on the client side */

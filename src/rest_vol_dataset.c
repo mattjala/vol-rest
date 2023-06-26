@@ -39,6 +39,12 @@ static herr_t RV_convert_obj_refs_to_buffer(const rv_obj_ref_t *ref_array, size_
 static herr_t RV_convert_buffer_to_obj_refs(char *ref_buf, size_t ref_buf_len, rv_obj_ref_t **buf_out,
                                             size_t *buf_out_len);
 
+/* Struct for H5Dscatter's callback that allows it to scatter from a non-global response buffer */
+struct response_read_info {
+    struct response_buffer *response_buf;
+    void                   *read_size;
+} typedef response_read_info;
+
 /* H5Dscatter() callback for dataset reads */
 static herr_t dataset_read_scatter_op(const void **src_buf, size_t *src_buf_bytes_used, void *op_data);
 
@@ -65,6 +71,12 @@ const char *external_storage_keys[]       = {"externalStorage", (const char *)0}
 #define DATASET_CREATE_MAX_COMPACT_ATTRIBUTES_DEFAULT 8
 #define DATASET_CREATE_MIN_DENSE_ATTRIBUTES_DEFAULT   6
 #define OBJECT_REF_STRING_LEN                         48
+#define NUM_MAX_HOST_CONNS                            50
+/* Default initial size for the response buffer allocated which cURL writes
+ * its responses into
+ TODO Don't duplicate this
+ */
+#define CURL_RESPONSE_BUFFER_DEFAULT_SIZE 1024
 
 /* Default sizes for strings formed when dealing with turning a
  * representation of an HDF5 dataspace and a selection within one into JSON
@@ -416,207 +428,313 @@ done:
  *              March, 2017
  */
 herr_t
-RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t mem_space_id[], hid_t file_space_id[],
+RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_space_id[], hid_t _file_space_id[],
                 hid_t dxpl_id, void *buf[], void **req)
 {
-    H5S_sel_type sel_type = H5S_SEL_ALL;
-    RV_object_t *dataset  = (RV_object_t *)dset[0];
-    H5T_class_t  dtype_class;
-    hssize_t     mem_select_npoints, file_select_npoints;
-    hbool_t      is_transfer_binary = FALSE;
-    htri_t       is_variable_str;
-    size_t       read_data_size;
-    size_t       selection_body_len = 0;
-    size_t       host_header_len    = 0;
-    char        *host_header        = NULL;
-    char        *selection_body     = NULL;
-    void        *obj_ref_buf        = NULL;
-    char         request_url[URL_MAX_LENGTH];
-    int          url_len   = 0;
-    herr_t       ret_value = SUCCEED;
+    struct response_buffer *response_buffers = NULL;
+    H5S_sel_type           *sel_type_arr     = NULL;
+    curl_off_t             *post_len_arr     = NULL;
+    RV_object_t           **datasets         = (RV_object_t **)dset;
+    H5T_class_t             dtype_class;
+    hssize_t                mem_select_npoints, file_select_npoints;
+    hid_t                  *mem_space_id = NULL, *file_space_id = NULL;
+    hbool_t                 is_transfer_binary = FALSE;
+    htri_t                  is_variable_str;
+    size_t                  read_data_size;
+    size_t                  selection_body_len = 0;
+    size_t                  host_header_len    = 0;
+    char                  **host_header_arr    = NULL;
+    char                  **selection_body_arr = NULL;
+    void                   *obj_ref_buf        = NULL;
+    char                  **request_urls       = NULL;
+    int                     url_len            = 0;
+    herr_t                  ret_value          = SUCCEED;
+
+    CURL               *curl_multi_handle = NULL;
+    CURL              **curl_easy_handles = NULL;
+    char              **curl_err_bufs     = NULL;
+    struct curl_slist **curl_headers_arr  = NULL;
 
 #ifdef RV_CONNECTOR_DEBUG
     printf("-> Received dataset read call with following parameters:\n");
-    printf("     - Dataset's URI: %s\n", dataset->URI);
-    printf("     - Dataset's object type: %s\n", object_type_to_string(dataset->obj_type));
-    printf("     - Dataset's domain path: %s\n", dataset->domain->u.file.filepath_name);
-    printf("     - Entire memory dataspace selected? %s\n", (mem_space_id[0] == H5S_ALL) ? "yes" : "no");
-    printf("     - Entire file dataspace selected? %s\n", (file_space_id[0] == H5S_ALL) ? "yes" : "no");
+    for (size_t i = 0; i < count; i++) {
+        printf("     - Dataset %zu's URI: %s\n", i, datasets[i]->URI);
+        printf("     - Dataset %zu's object type: %s\n", i, object_type_to_string(datasets[i]->obj_type));
+        printf("     - Dataset %zu's domain path: %s\n", i, datasets[i]->domain->u.file.filepath_name);
+        printf("     - Entire memory dataspace selected? %s\n", (_mem_space_id[i] == H5S_ALL) ? "yes" : "no");
+        printf("     - Entire file dataspace selected? %s\n", (_file_space_id[i] == H5S_ALL) ? "yes" : "no");
+    }
     printf("     - Default DXPL? %s\n\n", (dxpl_id == H5P_DATASET_XFER_DEFAULT) ? "yes" : "no");
 #endif
 
-    if (count > 1)
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_UNSUPPORTED, FAIL, "multiple datasets are unsupported");
-    if (H5I_DATASET != dataset->obj_type)
-        FUNC_GOTO_ERROR(H5E_ARGS, H5E_BADVALUE, FAIL, "not a dataset");
-    if (!buf[0])
-        FUNC_GOTO_ERROR(H5E_ARGS, H5E_BADVALUE, FAIL, "read buffer was NULL");
+    if ((host_header_arr = calloc(count, sizeof(char *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for curl headers");
 
-    /* Determine whether it's possible to send the data as a binary blob instead of a JSON array */
-    if (H5T_NO_CLASS == (dtype_class = H5Tget_class(mem_type_id[0])))
-        FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL, "memory datatype is invalid");
+    if ((request_urls = calloc(count, sizeof(char *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for request URL(s))");
 
-    if ((is_variable_str = H5Tis_variable_str(mem_type_id[0])) < 0)
-        FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL, "memory datatype is invalid");
+    /* Always perform the write using a multi handle, even if it's only to one dataset */
+    curl_multi_handle = curl_multi_init();
 
-    /* Only perform a binary transfer for fixed-length datatype datasets with an
-     * All or Hyperslab selection. Point selections are dealt with by POSTing the
-     * point list as JSON in the request body.
-     */
-    is_transfer_binary = (H5T_VLEN != dtype_class) && !is_variable_str;
+    if ((curl_easy_handles = calloc(count, sizeof(CURL *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for curl pointers");
 
-    /* Follow the semantics for the use of H5S_ALL */
-    if (H5S_ALL == mem_space_id[0] && H5S_ALL == file_space_id[0]) {
-        /* The file dataset's dataspace is used for the memory dataspace
-         * and the selection within the memory dataspace is set to the
-         * "all" selection. The selection within the file dataset's
-         * dataspace is set to the "all" selection.
+    if ((response_buffers = calloc(count, sizeof(response_buffer))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for response buffers");
+
+    if ((curl_err_bufs = calloc(count, sizeof(char *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for curl err buffers");
+
+    if ((curl_headers_arr = calloc(count, sizeof(struct curl_slist *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for curl headers");
+
+    if ((selection_body_arr = calloc(count, sizeof(char *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for selection body(s)");
+
+    if ((sel_type_arr = calloc(count, sizeof(H5S_sel_type *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for selection type(s)");
+
+    if ((post_len_arr = calloc(count, sizeof(H5S_sel_type *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for post lengths");
+
+    /* Copy mspace and fspace arrays to local copy, to avoid modifying user's arrays */
+    if ((mem_space_id = calloc(count, sizeof(hid_t*))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for memory space pointers");
+
+    if ((file_space_id = calloc(count, sizeof(hid_t*))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for file space pointers");
+
+    /* Initialize arrays and check arguments */
+    for (size_t i = 0; i < count; i++) {
+        if (!buf[i])
+            FUNC_GOTO_ERROR(H5E_ARGS, H5E_BADVALUE, FAIL, "read buffer was NULL");
+
+        sel_type_arr[i] = H5S_SEL_ALL;
+
+        if ((request_urls[i] = calloc(URL_MAX_LENGTH, sizeof(char))) == NULL)
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for request URLs");
+        curl_easy_handles[i] = curl_easy_duphandle(curl);
+
+        if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_WRITEFUNCTION,
+                                         H5_rest_curl_write_data_callback_no_global))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set up non global curl write callback: %s",
+                            curl_err_bufs[i]);
+
+        if (NULL ==
+            (response_buffers[i].buffer = (char *)calloc(sizeof(char), CURL_RESPONSE_BUFFER_DEFAULT_SIZE)))
+            FUNC_GOTO_ERROR(H5E_VOL, H5E_CANTALLOC, FAIL, "can't allocate cURL response buffers");
+
+        if ((curl_err_bufs[i] = calloc(1, CURL_ERROR_SIZE)) == NULL)
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL,
+                            "failed to allocate memory for curl err buffers");
+
+        if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_ERRORBUFFER, curl_err_bufs[i]))
+            FUNC_GOTO_ERROR(H5E_VOL, H5E_CANTSET, FAIL, "can't set cURL error buffer");
+
+        response_buffers[i].buffer_size  = CURL_RESPONSE_BUFFER_DEFAULT_SIZE;
+        response_buffers[i].curr_buf_ptr = response_buffers[i].buffer;
+
+        if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_WRITEDATA, &response_buffers[i]))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set up non global curl write data: %s",
+                            curl_err_buf);
+
+        mem_space_id[i] = _mem_space_id[i];
+        file_space_id[i] = _file_space_id[i];
+
+        curl_headers_arr[i] = NULL;
+        host_header_arr[i]  = NULL;
+    }
+
+    /* Iterate over datasets to read from */
+    for (size_t i = 0; i < count; i++) {
+        if (H5I_DATASET != datasets[i]->obj_type)
+            FUNC_GOTO_ERROR(H5E_ARGS, H5E_BADVALUE, FAIL, "not a dataset");
+
+        /* Determine whether it's possible to send the data as a binary blob instead of a JSON array */
+        if (H5T_NO_CLASS == (dtype_class = H5Tget_class(mem_type_id[i])))
+            FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL, "memory datatype is invalid");
+
+        if ((is_variable_str = H5Tis_variable_str(mem_type_id[i])) < 0)
+            FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL, "memory datatype is invalid");
+
+        /* Only perform a binary transfer for fixed-length datatype datasets with an
+         * All or Hyperslab selection. Point selections are dealt with by POSTing the
+         * point list as JSON in the request body.
          */
-        mem_space_id[0] = file_space_id[0] = dataset->u.dataset.space_id;
-        H5Sselect_all(file_space_id[0]);
-    } /* end if */
-    else if (H5S_ALL == file_space_id[0]) {
-        /* mem_space_id specifies the memory dataspace and the selection
-         * within it. The selection within the file dataset's dataspace
-         * is set to the "all" selection.
-         */
-        file_space_id[0] = dataset->u.dataset.space_id;
-        H5Sselect_all(file_space_id[0]);
-    } /* end if */
-    else {
-        /* The file dataset's dataspace is used for the memory dataspace
-         * and the selection specified with file_space_id specifies the
-         * selection within it. The combination of the file dataset's
-         * dataspace and the selection from file_space_id is used for
-         * memory also.
-         */
-        if (H5S_ALL == mem_space_id[0]) {
-            mem_space_id[0] = dataset->u.dataset.space_id;
+        is_transfer_binary = (H5T_VLEN != dtype_class) && !is_variable_str;
 
-            /* Copy the selection from file_space_id into the mem_space_id. */
-            if (H5Sselect_copy(mem_space_id[0], file_space_id[0]) < 0)
-                FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_CANTCOPY, FAIL,
-                                "can't copy selection from file space to memory space");
+        /* Follow the semantics for the use of H5S_ALL */
+        if (H5S_ALL == mem_space_id[i] && H5S_ALL == file_space_id[i]) {
+            /* The file dataset's dataspace is used for the memory dataspace
+             * and the selection within the memory dataspace is set to the
+             * "all" selection. The selection within the file dataset's
+             * dataspace is set to the "all" selection.
+             */
+            mem_space_id[i] = file_space_id[i] = datasets[i]->u.dataset.space_id;
+            H5Sselect_all(file_space_id[i]);
         } /* end if */
+        else if (H5S_ALL == file_space_id[i]) {
+            /* mem_space_id specifies the memory dataspace and the selection
+             * within it. The selection within the file dataset's dataspace
+             * is set to the "all" selection.
+             */
+            file_space_id[i] = datasets[i]->u.dataset.space_id;
+            H5Sselect_all(file_space_id[i]);
+        } /* end if */
+        else {
+            /* The file dataset's dataspace is used for the memory dataspace
+             * and the selection specified with file_space_id specifies the
+             * selection within it. The combination of the file dataset's
+             * dataspace and the selection from file_space_id is used for
+             * memory also.
+             */
+            if (H5S_ALL == mem_space_id[i]) {
+                mem_space_id[i] = datasets[i]->u.dataset.space_id;
 
-        /* Since the selection in the dataset's file dataspace is not set
-         * to "all", convert the selection into JSON */
+                /* Copy the selection from file_space_id into the mem_space_id. */
+                if (H5Sselect_copy(mem_space_id[i], file_space_id[i]) < 0)
+                    FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_CANTCOPY, FAIL,
+                                    "can't copy selection from file space to memory space");
+            } /* end if */
 
-        /* Retrieve the selection type to choose how to format the dataspace selection */
-        if (H5S_SEL_ERROR == (sel_type = H5Sget_select_type(file_space_id[0])))
-            FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_CANTGET, FAIL, "can't get dataspace selection type");
-        is_transfer_binary = is_transfer_binary && (H5S_SEL_POINTS != sel_type);
+            /* Since the selection in the dataset's file dataspace is not set
+             * to "all", convert the selection into JSON */
 
-        if (RV_convert_dataspace_selection_to_string(file_space_id[0], &selection_body, &selection_body_len,
-                                                     is_transfer_binary) < 0)
-            FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_CANTCONVERT, FAIL,
-                            "can't convert dataspace selection to string representation");
-    } /* end else */
+            /* Retrieve the selection type to choose how to format the dataspace selection */
+            if (H5S_SEL_ERROR == (sel_type_arr[i] = H5Sget_select_type(file_space_id[i])))
+                FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_CANTGET, FAIL, "can't get dataspace selection type");
+            is_transfer_binary = is_transfer_binary && (H5S_SEL_POINTS != sel_type_arr[i]);
 
-    /* Verify that the number of selected points matches */
-    if ((mem_select_npoints = H5Sget_select_npoints(mem_space_id[0])) < 0)
-        FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL, "memory dataspace is invalid");
-    if ((file_select_npoints = H5Sget_select_npoints(file_space_id[0])) < 0)
-        FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL, "file dataspace is invalid");
-    if (mem_select_npoints != file_select_npoints)
-        FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL,
-                        "memory selection num points != file selection num points");
+            if (RV_convert_dataspace_selection_to_string(file_space_id[i], &(selection_body_arr[i]),
+                                                         &selection_body_len, is_transfer_binary) < 0)
+                FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_CANTCONVERT, FAIL,
+                                "can't convert dataspace selection to string representation");
+        } /* end else */
+
+        /* Verify that the number of selected points matches */
+        if ((mem_select_npoints = H5Sget_select_npoints(mem_space_id[i])) < 0)
+            FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL, "memory dataspace is invalid");
+        if ((file_select_npoints = H5Sget_select_npoints(file_space_id[i])) < 0)
+            FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL, "file dataspace is invalid");
+        if (mem_select_npoints != file_select_npoints)
+            FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL,
+                            "memory selection num points != file selection num points");
 
 #ifdef RV_CONNECTOR_DEBUG
-    printf("-> %lld points selected in file dataspace\n", file_select_npoints);
-    printf("-> %lld points selected in memory dataspace\n\n", mem_select_npoints);
+        printf("-> %lld points selected in file dataspace\n", file_select_npoints);
+        printf("-> %lld points selected in memory dataspace\n\n", mem_select_npoints);
 #endif
 
-    /* Setup the host header */
-    host_header_len = strlen(dataset->domain->u.file.filepath_name) + strlen(host_string) + 1;
-    if (NULL == (host_header = (char *)RV_malloc(host_header_len)))
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "can't allocate space for request Host header");
+        /* Setup the host header */
+        host_header_len = strlen(datasets[i]->domain->u.file.filepath_name) + strlen(host_string) + 1;
+        if (NULL == (host_header_arr[i] = (char *)RV_malloc(host_header_len)))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "can't allocate space for request Host header");
 
-    strcpy(host_header, host_string);
+        strcpy(host_header_arr[i], host_string);
 
-    curl_headers = curl_slist_append(curl_headers, strncat(host_header, dataset->domain->u.file.filepath_name,
-                                                           host_header_len - strlen(host_string) - 1));
+        curl_headers_arr[i] = curl_slist_append(
+            curl_headers_arr[i], strncat(host_header_arr[i], datasets[i]->domain->u.file.filepath_name,
+                                         host_header_len - strlen(host_string) - 1));
 
-    /* Disable use of Expect: 100 Continue HTTP response */
-    curl_headers = curl_slist_append(curl_headers, "Expect:");
+        /* Disable use of Expect: 100 Continue HTTP response */
+        curl_headers_arr[i] = curl_slist_append(curl_headers_arr[i], "Expect:");
 
-    /* Instruct cURL on which type of transfer to perform, binary or JSON */
-    curl_headers = curl_slist_append(curl_headers, is_transfer_binary ? "Accept: application/octet-stream"
+        /* Instruct cURL on which type of transfer to perform, binary or JSON */
+        curl_headers_arr[i] =
+            curl_slist_append(curl_headers_arr[i], is_transfer_binary ? "Accept: application/octet-stream"
                                                                       : "Accept: application/json");
 
-    /* Redirect cURL from the base URL to "/datasets/<id>/value" to get the dataset data values */
-    if ((url_len = snprintf(
-             request_url, URL_MAX_LENGTH, "%s/datasets/%s/value%s%s", base_URL, dataset->URI,
-             is_transfer_binary && selection_body && (H5S_SEL_POINTS != sel_type) ? "?select=" : "",
-             is_transfer_binary && selection_body && (H5S_SEL_POINTS != sel_type) ? selection_body : "")) < 0)
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_SYSERRSTR, FAIL, "snprintf error");
+        /* Redirect cURL from the base URL to "/datasets/<id>/value" to get the dataset data values */
+        if ((url_len = snprintf(
+                 request_urls[i], URL_MAX_LENGTH, "%s/datasets/%s/value%s%s", base_URL, datasets[i]->URI,
+                 is_transfer_binary && selection_body_arr[i] && (H5S_SEL_POINTS != sel_type_arr[i])
+                     ? "?select="
+                     : "",
+                 is_transfer_binary && selection_body_arr[i] && (H5S_SEL_POINTS != sel_type_arr[i])
+                     ? selection_body_arr[i]
+                     : "")) < 0)
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_SYSERRSTR, FAIL, "snprintf error");
 
-    if (url_len >= URL_MAX_LENGTH)
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_SYSERRSTR, FAIL, "dataset read URL size exceeded maximum URL size");
+        if (url_len >= URL_MAX_LENGTH)
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_SYSERRSTR, FAIL,
+                            "dataset read URL size exceeded maximum URL size");
 
 #ifdef RV_CONNECTOR_DEBUG
-    printf("-> Dataset read URL: %s\n\n", request_url);
+        printf("-> Dataset read URL: %s\n\n", request_urls[i]);
 #endif
 
-    /* If using a point selection, instruct cURL to perform a POST request
-     * in order to post the point list. Otherwise, a simple GET request
-     * can be made, where the selection body should have already been
-     * added as a request parameter to the GET URL.
-     */
-    if (H5S_SEL_POINTS == sel_type) {
-        curl_off_t post_len;
-
-        /* As the dataspace-selection-to-string function is not designed to include the enclosing '{' and '}',
-         * since returning just the selection string to the user makes more sense if they are including more
-         * elements in their JSON, we have to wrap the selection body here before sending it off to cURL
+        /* If using a point selection, instruct cURL to perform a POST request
+         * in order to post the point list. Otherwise, a simple GET request
+         * can be made, where the selection body should have already been
+         * added as a request parameter to the GET URL.
          */
+        if (H5S_SEL_POINTS == sel_type_arr[i]) {
+            /* As the dataspace-selection-to-string function is not designed to include the enclosing '{' and
+             * '}', since returning just the selection string to the user makes more sense if they are
+             * including more elements in their JSON, we have to wrap the selection body here before sending
+             * it off to cURL
+             */
 
-        /* Ensure we have enough space to add the enclosing '{' and '}' */
-        if (NULL == (selection_body = (char *)RV_realloc(selection_body, selection_body_len + 3)))
-            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL,
-                            "can't reallocate space for point selection body");
+            /* Ensure we have enough space to add the enclosing '{' and '}' */
+            if (NULL ==
+                (selection_body_arr[i] = (char *)RV_realloc(selection_body_arr[i], selection_body_len + 3)))
+                FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL,
+                                "can't reallocate space for point selection body");
 
-        /* Shift the whole string down by a byte */
-        memmove(selection_body + 1, selection_body, selection_body_len + 1);
+            /* Shift the whole string down by a byte */
+            memmove(selection_body_arr[i] + 1, selection_body_arr[i], selection_body_len + 1);
 
-        /* Add in the braces */
-        selection_body[0]                      = '{';
-        selection_body[selection_body_len + 1] = '}';
-        selection_body[selection_body_len + 2] = '\0';
+            /* Add in the braces */
+            selection_body_arr[i][0]                      = '{';
+            selection_body_arr[i][selection_body_len + 1] = '}';
+            selection_body_arr[i][selection_body_len + 2] = '\0';
 
-        /* Check to make sure that the size of the selection HTTP body can safely be cast to a curl_off_t */
-        if (sizeof(curl_off_t) < sizeof(size_t))
-            ASSIGN_TO_SMALLER_SIZE(post_len, curl_off_t, selection_body_len + 2, size_t)
-        else if (sizeof(curl_off_t) > sizeof(size_t))
-            post_len = (curl_off_t)(selection_body_len + 2);
-        else
-            ASSIGN_TO_SAME_SIZE_UNSIGNED_TO_SIGNED(post_len, curl_off_t, selection_body_len + 2, size_t)
+            /* Check to make sure that the size of the selection HTTP body can safely be cast to a curl_off_t
+             */
+            if (sizeof(curl_off_t) < sizeof(size_t))
+                ASSIGN_TO_SMALLER_SIZE(post_len_arr[i], curl_off_t, selection_body_len + 2, size_t)
+            else if (sizeof(curl_off_t) > sizeof(size_t))
+                post_len_arr[i] = (curl_off_t)(selection_body_len + 2);
+            else
+                ASSIGN_TO_SAME_SIZE_UNSIGNED_TO_SIGNED(post_len_arr[i], curl_off_t, selection_body_len + 2,
+                                                       size_t)
 
-        if (CURLE_OK != curl_easy_setopt(curl, CURLOPT_POST, 1))
-            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set up cURL to make HTTP POST request: %s",
-                            curl_err_buf);
-        if (CURLE_OK != curl_easy_setopt(curl, CURLOPT_POSTFIELDS, selection_body))
-            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL POST data: %s", curl_err_buf);
-        if (CURLE_OK != curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, post_len))
-            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL POST data size: %s",
-                            curl_err_buf);
+            if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_POST, 1))
+                FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL,
+                                "can't set up cURL to make HTTP POST request: %s", curl_err_bufs[i]);
 
-        curl_headers = curl_slist_append(curl_headers, "Content-Type: application/json");
+            /* CURLOPT_POSTFIELDS is the one option that isn't copied internally by the curl library, so we
+             * need to keep the memory around until the read is finished */
+            if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_POSTFIELDS, selection_body_arr[i]))
+                FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL POST data: %s",
+                                curl_err_bufs[i]);
+            if (CURLE_OK !=
+                curl_easy_setopt(curl_easy_handles[i], CURLOPT_POSTFIELDSIZE_LARGE, post_len_arr[i]))
+                FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL POST data size: %s",
+                                curl_err_bufs[i]);
+
+            curl_headers_arr[i] = curl_slist_append(curl_headers_arr[i], "Content-Type: application/json");
 
 #ifdef RV_CONNECTOR_DEBUG
-        printf("-> Setup cURL to POST point list for dataset read\n\n");
+            printf("-> Setup cURL to POST point list for dataset read\n\n");
 #endif
-    } /* end if */
-    else {
-        if (CURLE_OK != curl_easy_setopt(curl, CURLOPT_HTTPGET, 1))
-            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set up cURL to make HTTP GET request: %s",
-                            curl_err_buf);
-    } /* end else */
+        } /* end if */
+        else {
+            if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_HTTPGET, 1))
+                FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL,
+                                "can't set up cURL to make HTTP GET request: %s", curl_err_buf);
+        } /* end else */
 
-    if (CURLE_OK != curl_easy_setopt(curl, CURLOPT_HTTPHEADER, curl_headers))
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL HTTP headers: %s", curl_err_buf);
-    if (CURLE_OK != curl_easy_setopt(curl, CURLOPT_URL, request_url))
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL request URL: %s", curl_err_buf);
+        if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_HTTPHEADER, curl_headers_arr[i]))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL HTTP headers: %s",
+                            curl_err_bufs[i]);
+        if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_URL, request_urls[i]))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL request URL: %s",
+                            curl_err_bufs[i]);
+
+        if (CURLM_OK != curl_multi_add_handle(curl_multi_handle, curl_easy_handles[i]))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't add cURL handle: %s", curl_err_buf);
+    }
 
 #ifdef RV_CONNECTOR_DEBUG
     printf("-> Reading dataset\n\n");
@@ -626,48 +744,185 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t mem_space
     printf("   \\***************************************/\n\n");
 #endif
 
-    CURL_PERFORM(curl, H5E_DATASET, H5E_READERROR, FAIL);
+    if (CURLM_OK != curl_multi_setopt(curl_multi_handle, CURLMOPT_MAX_HOST_CONNECTIONS, NUM_MAX_HOST_CONNS))
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "failed to set max concurrent streams: %s",
+                        curl_err_buf);
 
-    if ((H5T_REFERENCE != dtype_class) && (H5T_VLEN != dtype_class) && !is_variable_str) {
-        size_t dtype_size;
+    int      still_running   = 1;
+    int      msgq            = 0;
+    CURLMsg *curl_mult_msg   = NULL;
+    size_t   fail_count      = 0;
+    size_t   events_occurred = 0;
 
-        if (0 == (dtype_size = H5Tget_size(mem_type_id[0])))
-            FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL, "memory datatype is invalid");
+    while (still_running || fail_count > 0) {
+        fail_count = 0;
 
-        /* Scatter the read data out to the supplied read buffer according to the mem_type_id
-         * and mem_space_id given */
-        read_data_size = (size_t)file_select_npoints * dtype_size;
-        if (H5Dscatter(dataset_read_scatter_op, &read_data_size, mem_type_id[0], mem_space_id[0], buf[0]) < 0)
-            FUNC_GOTO_ERROR(H5E_DATASET, H5E_READERROR, FAIL, "can't scatter data to read buffer");
-    } /* end if */
-    else {
-        if (H5T_STD_REF_OBJ == mem_type_id[0]) {
-            /* Convert the received binary buffer into a buffer of rest_obj_ref_t's */
-            if (RV_convert_buffer_to_obj_refs(response_buffer.buffer, (size_t)file_select_npoints,
-                                              (rv_obj_ref_t **)&obj_ref_buf, &read_data_size) < 0)
-                FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_CANTCONVERT, FAIL,
-                                "can't convert ref string/s to object ref array");
+        if (CURLM_OK != curl_multi_perform(curl_multi_handle, &still_running))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "cURL multi perform error");
 
-            memcpy(buf[0], obj_ref_buf, read_data_size);
-        } /* end if */
-    }     /* end else */
+        if (still_running) {
+            if (CURLM_OK != curl_multi_poll(curl_multi_handle, NULL, 0, 1000, &events_occurred))
+                FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "cURL multi poll error");
+
+#ifdef RV_CONNECTOR_DEBUG
+            printf("%zu events occurred\n", events_occurred);
+#endif
+        }
+
+        while (curl_mult_msg = curl_multi_info_read(curl_multi_handle, &msgq)) {
+            long response_code;
+            
+            if (curl_mult_msg->msg == CURLMSG_DONE) {
+                if (CURLE_OK !=
+                    curl_easy_getinfo(curl_mult_msg->easy_handle, CURLINFO_RESPONSE_CODE, &response_code))
+                    FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "can't get HTTP response code");
+
+#ifdef RV_CONNECTOR_DEBUG
+printf(" RV_dataset_read to %zu elements received %zu response\n", count, response_code);
+#endif
+                /* Gracefully handle 503 Error, which can result from sending too many simultaneous
+                    * requests */
+                if (response_code == 503) {
+                    fail_count++;
+
+                    size_t handle_index = 0;
+
+                    if (RV_get_index_of_matching_handle(curl_easy_handles, count, curl_mult_msg->easy_handle, &handle_index) < 0)
+                        FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "can't get handle information for retry");
+
+                    if (CURLM_OK != curl_multi_remove_handle(curl_multi_handle, curl_mult_msg->easy_handle))
+                        FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "failed to remove denied cURL handle");
+
+                    if (CURLM_OK != curl_multi_add_handle(curl_multi_handle, curl_mult_msg->easy_handle))
+                        FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "failed to re-add denied cURL handle");
+
+                    response_buffers[handle_index].curr_buf_ptr =
+                        response_buffers[handle_index].buffer;
+                }
+                else if (response_code == 200) {
+                    /* Do post-processing now so that we can clean up early to try and improve performance
+                        * for large r/w */
+
+                    size_t handle_index = 0;
+
+                    if (RV_get_index_of_matching_handle(curl_easy_handles, count, curl_mult_msg->easy_handle, &handle_index) < 0)
+                        FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "can't get handle information for retry");
+
+                    /* Post-processing */
+                    if ((H5T_REFERENCE != dtype_class) && (H5T_VLEN != dtype_class) && !is_variable_str) {
+                        size_t dtype_size;
+
+                        if (0 == (dtype_size = H5Tget_size(mem_type_id[handle_index])))
+                            FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL,
+                                            "memory datatype is invalid");
+
+                        /* Scatter the read data out to the supplied read buffer according to the
+                            * mem_type_id and mem_space_id given */
+                        read_data_size = (size_t)file_select_npoints * dtype_size;
+                        struct response_read_info resp_info;
+                        resp_info.response_buf = &response_buffers[handle_index];
+                        resp_info.read_size    = &read_data_size;
+
+                        if (H5Dscatter(dataset_read_scatter_op, &resp_info, mem_type_id[handle_index],
+                                        mem_space_id[handle_index], buf[handle_index]) < 0)
+                            FUNC_GOTO_ERROR(H5E_DATASET, H5E_READERROR, FAIL,
+                                            "can't scatter data to read buffer");
+                    }
+                    else {
+                        if (H5T_STD_REF_OBJ == mem_type_id[handle_index]) {
+                            /* Convert the received binary buffer into a buffer of rest_obj_ref_t's */
+                            if (RV_convert_buffer_to_obj_refs(
+                                    response_buffers[handle_index].buffer, (size_t)file_select_npoints,
+                                    (rv_obj_ref_t **)&obj_ref_buf, &read_data_size) < 0)
+                                FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_CANTCONVERT, FAIL,
+                                                "can't convert ref string/s to object ref array");
+
+                            memcpy(buf[handle_index], obj_ref_buf, read_data_size);
+                        }
+                    }
+
+                    /* Clean up */
+                    if (CURLM_OK !=
+                        curl_multi_remove_handle(curl_multi_handle, curl_mult_msg->easy_handle))
+                        FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL,
+                                        "failed to remove finished cURL handle");
+
+                    curl_easy_cleanup(curl_mult_msg->easy_handle);
+
+                    curl_easy_handles[handle_index] = NULL;
+
+                    RV_free(request_urls[handle_index]);
+                    request_urls[handle_index] = NULL;
+
+                    RV_free(response_buffers[handle_index].buffer);
+                    response_buffers[handle_index].buffer = NULL;
+
+                    RV_free(curl_err_bufs[handle_index]);
+                    curl_err_bufs[handle_index] = NULL;
+                }
+                else {
+                    HANDLE_RESPONSE(response_code, H5E_DATASET, H5E_READERROR, FAIL);
+                }
+            }
+        } /* while (curl_mult_msg);*/
+
+    } /* while (still_running || fail_count > 0); */
+
+#ifdef RV_CONNECTOR_DEBUG
+        printf("%zu handles failed%s\n", fail_count, (fail_count > 0) ? ", retrying..." : "");
+#endif
+
+    /* Repeated serial requests */
+    /*
+    for (size_t i = 0; i < count; i++) {
+        CURL_PERFORM_NO_GLOBAL(curl_easy_handles[i], response_buffers[i], H5E_DATASET, H5E_WRITEERROR, FAIL);
+    }
+    */
+
+    /* Post-processing of read data */
+    for (size_t i = 0; i < count; i++) {
+    }
 
 done:
-#ifdef RV_CONNECTOR_DEBUG
-    printf("-> Dataset read response buffer:\n%s\n\n", response_buffer.buffer);
-#endif
 
     if (obj_ref_buf)
         RV_free(obj_ref_buf);
-    if (host_header)
-        RV_free(host_header);
-    if (selection_body)
-        RV_free(selection_body);
 
-    if (curl_headers) {
-        curl_slist_free_all(curl_headers);
-        curl_headers = NULL;
-    } /* end if */
+    for (size_t i = 0; i < count; i++) {
+        if (curl_headers_arr) {
+            curl_slist_free_all(curl_headers_arr[i]);
+            curl_headers_arr[i] = NULL;
+        }
+
+        if (selection_body_arr)
+            RV_free(selection_body_arr[i]);
+
+        /* Might have been cleaned up during execution */
+        if (curl_easy_handles[i]) {
+            curl_multi_remove_handle(curl_multi_handle, curl_easy_handles[i]);
+            curl_easy_cleanup(curl_easy_handles[i]);
+        }
+
+        RV_free(response_buffers[i].buffer);
+        RV_free(curl_err_bufs[i]);
+        RV_free(request_urls[i]);
+
+        if (host_header_arr)
+            RV_free(host_header_arr[i]);
+    }
+
+    curl_multi_cleanup(curl_multi_handle);
+    RV_free(selection_body_arr);
+    RV_free(response_buffers);
+    RV_free(curl_headers_arr);
+    RV_free(request_urls);
+    RV_free(curl_easy_handles);
+    RV_free(curl_err_bufs);
+    RV_free(sel_type_arr);
+    RV_free(post_len_arr);
+    RV_free(host_header_arr);
+    RV_free(mem_space_id);
+    RV_free(file_space_id);
 
     PRINT_ERROR_STACK;
 
@@ -687,248 +942,359 @@ done:
  *              March, 2017
  */
 herr_t
-RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t mem_space_id[], hid_t file_space_id[],
+RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_space_id[], hid_t _file_space_id[],
                  hid_t dxpl_id, const void *buf[], void **req)
 {
-    H5S_sel_type sel_type = H5S_SEL_ALL;
-    RV_object_t *dataset  = (RV_object_t *)dset[0];
-    upload_info  uinfo;
-    H5T_class_t  dtype_class;
-    curl_off_t   write_len;
-    hssize_t     mem_select_npoints, file_select_npoints;
-    hbool_t      is_transfer_binary = FALSE;
-    htri_t       is_variable_str;
-    size_t       host_header_len      = 0;
-    size_t       write_body_len       = 0;
-    size_t       selection_body_len   = 0;
-    char        *selection_body       = NULL;
-    char        *base64_encoded_value = NULL;
-    char        *host_header          = NULL;
-    char        *write_body           = NULL;
-    char         request_url[URL_MAX_LENGTH];
-    int          url_len   = 0;
-    herr_t       ret_value = SUCCEED;
+    H5S_sel_type  sel_type  = H5S_SEL_ALL;
+    RV_object_t **datasets  = NULL;
+    upload_info  *uinfo_arr = NULL;
+    H5T_class_t   dtype_class;
+    curl_off_t   *write_len = NULL;
+    hssize_t      mem_select_npoints, file_select_npoints;
+    hid_t        *mem_space_id = NULL, *file_space_id = NULL;
+    hbool_t       is_transfer_binary = FALSE;
+    htri_t        is_variable_str;
+    size_t        host_header_len       = 0;
+    size_t        write_body_len        = 0;
+    size_t        selection_body_len    = 0;
+    char         *selection_body        = NULL;
+    char        **base64_encoded_values = NULL;
+    char        **host_header_arr       = NULL;
+    char        **write_bodies          = NULL;
+    char        **request_urls;
+    int           url_len   = 0;
+    herr_t        ret_value = SUCCEED;
 
-#ifdef RV_CONNECTOR_DEBUG
-    printf("-> Received dataset write call with following parameters:\n");
-    printf("     - Dataset's URI: %s\n", dataset->URI);
-    printf("     - Dataset's object type: %s\n", object_type_to_string(dataset->obj_type));
-    printf("     - Dataset's domain path: %s\n", dataset->domain->u.file.filepath_name);
-    printf("     - Entire memory dataspace selected? %s\n", (mem_space_id[0] == H5S_ALL) ? "yes" : "no");
-    printf("     - Entire file dataspace selected? %s\n", (file_space_id[0] == H5S_ALL) ? "yes" : "no");
-    printf("     - Default DXPL? %s\n\n", (dxpl_id == H5P_DATASET_XFER_DEFAULT) ? "yes" : "no");
-#endif
+    struct response_buffer *response_buffers  = NULL;
+    struct curl_slist     **curl_headers_arr  = NULL;
+    CURL                   *curl_multi_handle = NULL;
+    CURL                  **curl_easy_handles = NULL;
+    char                  **curl_err_bufs     = NULL;
 
-    if (count > 1)
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_UNSUPPORTED, FAIL, "multiple datasets are unsupported");
-    if (H5I_DATASET != dataset->obj_type)
-        FUNC_GOTO_ERROR(H5E_ARGS, H5E_BADVALUE, FAIL, "not a dataset");
-    if (!buf[0])
-        FUNC_GOTO_ERROR(H5E_ARGS, H5E_BADVALUE, FAIL, "write buffer was NULL");
+    if ((curl_headers_arr = calloc(count, sizeof(struct curl_slist *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for curl headers");
 
-    /* Check for write access */
-    if (!(dataset->domain->u.file.intent & H5F_ACC_RDWR))
-        FUNC_GOTO_ERROR(H5E_FILE, H5E_BADVALUE, FAIL, "no write intent on file");
+    if ((host_header_arr = calloc(count, sizeof(char *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for host headers");
 
-    /* Determine whether it's possible to send the data as a binary blob instead of as JSON */
-    if (H5T_NO_CLASS == (dtype_class = H5Tget_class(mem_type_id[0])))
-        FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL, "memory datatype is invalid");
+    if ((datasets = calloc(count, sizeof(RV_object_t *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for dset pointer(s)");
 
-    if ((is_variable_str = H5Tis_variable_str(mem_type_id[0])) < 0)
-        FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL, "memory datatype is invalid");
+    if ((request_urls = calloc(count, sizeof(char *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for request URL(s))");
 
-    /* Only perform a binary transfer for fixed-length datatype datasets with an
-     * All or Hyperslab selection. Point selections are dealt with by POSTing the
-     * point list as JSON in the request body.
-     */
-    is_transfer_binary = (H5T_VLEN != dtype_class) && !is_variable_str;
+    if ((write_bodies = calloc(count, sizeof(char *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for write body(s)");
 
-    /* Follow the semantics for the use of H5S_ALL */
-    if (H5S_ALL == mem_space_id[0] && H5S_ALL == file_space_id[0]) {
-        /* The file dataset's dataspace is used for the memory dataspace
-         * and the selection within the memory dataspace is set to the
-         * "all" selection. The selection within the file dataset's
-         * dataspace is set to the "all" selection.
-         */
-        mem_space_id[0] = file_space_id[0] = dataset->u.dataset.space_id;
-        H5Sselect_all(file_space_id[0]);
-    } /* end if */
-    else if (H5S_ALL == file_space_id[0]) {
-        /* mem_space_id specifies the memory dataspace and the selection
-         * within it. The selection within the file dataset's dataspace
-         * is set to the "all" selection.
-         */
-        file_space_id[0] = dataset->u.dataset.space_id;
-        H5Sselect_all(file_space_id[0]);
-    } /* end if */
-    else {
-        /* The file dataset's dataspace is used for the memory dataspace
-         * and the selection specified with file_space_id specifies the
-         * selection within it. The combination of the file dataset's
-         * dataspace and the selection from file_space_id is used for
-         * memory also.
-         */
-        if (H5S_ALL == mem_space_id[0]) {
-            mem_space_id[0] = dataset->u.dataset.space_id;
+    if ((base64_encoded_values = calloc(count, sizeof(char *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL,
+                        "failed to allocate memory for encoded write body(s)");
 
-            /* Copy the selection from file_space_id into the mem_space_id */
-            if (H5Sselect_copy(mem_space_id[0], file_space_id[0]) < 0)
-                FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_CANTCOPY, FAIL,
-                                "can't copy selection from file space to memory space");
-        } /* end if */
+    if ((write_len = calloc(count, sizeof(curl_off_t *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for write length(s)");
 
-        /* Since the selection in the dataset's file dataspace is not set
-         * to "all", convert the selection into JSON */
+    /* Always perform the write using a multi handle, even if it's only to one dataset */
+    curl_multi_handle = curl_multi_init();
 
-        /* Retrieve the selection type here for later use */
-        if (H5S_SEL_ERROR == (sel_type = H5Sget_select_type(file_space_id[0])))
-            FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_CANTGET, FAIL, "can't get dataspace selection type");
-        is_transfer_binary = is_transfer_binary && (H5S_SEL_POINTS != sel_type);
+    if ((curl_easy_handles = calloc(count, sizeof(CURL *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for curl pointers");
 
-        if (RV_convert_dataspace_selection_to_string(file_space_id[0], &selection_body, &selection_body_len,
-                                                     is_transfer_binary) < 0)
-            FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_CANTCONVERT, FAIL,
-                            "can't convert dataspace selection to string representation");
-    } /* end else */
+    if ((response_buffers = calloc(count, sizeof(response_buffer))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for response buffers");
 
-    /* Verify that the number of selected points matches */
-    if ((mem_select_npoints = H5Sget_select_npoints(mem_space_id[0])) < 0)
-        FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL, "memory dataspace is invalid");
-    if ((file_select_npoints = H5Sget_select_npoints(file_space_id[0])) < 0)
-        FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL, "file dataspace is invalid");
-    if (mem_select_npoints != file_select_npoints)
-        FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL,
-                        "memory selection num points != file selection num points");
+    if ((curl_err_bufs = calloc(count, sizeof(char *))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for curl err buffers");
 
-#ifdef RV_CONNECTOR_DEBUG
-    printf("-> %lld points selected in file dataspace\n", file_select_npoints);
-    printf("-> %lld points selected in memory dataspace\n\n", mem_select_npoints);
-#endif
+    if ((uinfo_arr = calloc(count, sizeof(upload_info))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for upload info");
 
-    /* Setup the size of the data being transferred and the data buffer itself (for non-simple
-     * types like object references or variable length types)
-     */
-    if ((H5T_REFERENCE != dtype_class) && (H5T_VLEN != dtype_class) && !is_variable_str) {
-        size_t dtype_size;
+    /* Copy mspace and fspace arrays to local copy, to avoid modifying user's arrays */
+    if ((mem_space_id = calloc(count, sizeof(hid_t*))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for memory space pointers");
 
-        if (0 == (dtype_size = H5Tget_size(mem_type_id[0])))
-            FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL, "memory datatype is invalid");
+    if ((file_space_id = calloc(count, sizeof(hid_t*))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for file space pointers");
 
-        write_body_len = (size_t)file_select_npoints * dtype_size;
-    } /* end if */
-    else {
-        if (H5T_STD_REF_OBJ == mem_type_id[0]) {
-            /* Convert the buffer of rest_obj_ref_t's to a binary buffer */
-            if (RV_convert_obj_refs_to_buffer((const rv_obj_ref_t *)buf[0], (size_t)file_select_npoints,
-                                              &write_body, &write_body_len) < 0)
-                FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_CANTCONVERT, FAIL,
-                                "can't convert object ref/s to ref string/s");
-            buf[0] = write_body;
-        } /* end if */
-    }     /* end else */
+    /* Initialize arrays */
+    for (size_t i = 0; i < count; i++) {
+        write_bodies[i]          = NULL;
+        base64_encoded_values[i] = NULL;
 
-    /* Setup the host header */
-    host_header_len = strlen(dataset->domain->u.file.filepath_name) + strlen(host_string) + 1;
-    if (NULL == (host_header = (char *)RV_malloc(host_header_len)))
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "can't allocate space for request Host header");
+        datasets[i] = (RV_object_t *)dset[i];
 
-    strcpy(host_header, host_string);
+        if ((request_urls[i] = calloc(URL_MAX_LENGTH, sizeof(char))) == NULL)
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for request URLs");
 
-    curl_headers = curl_slist_append(curl_headers, strncat(host_header, dataset->domain->u.file.filepath_name,
-                                                           host_header_len - strlen(host_string) - 1));
+        if (!buf[i])
+            FUNC_GOTO_ERROR(H5E_ARGS, H5E_BADVALUE, FAIL, "a given write buffer was NULL");
 
-    /* Disable use of Expect: 100 Continue HTTP response */
-    curl_headers = curl_slist_append(curl_headers, "Expect:");
+        /* Check for write access. */
+        if (!(datasets[i]->domain->u.file.intent & H5F_ACC_RDWR))
+            FUNC_GOTO_ERROR(H5E_FILE, H5E_BADVALUE, FAIL, "no write intent on file");
 
-    /* Instruct cURL on which type of transfer to perform, binary or JSON */
-    curl_headers =
-        curl_slist_append(curl_headers, is_transfer_binary ? "Content-Type: application/octet-stream"
-                                                           : "Content-Type: application/json");
+        if (H5I_DATASET != datasets[i]->obj_type)
+            FUNC_GOTO_ERROR(H5E_ARGS, H5E_BADVALUE, FAIL, "not a dataset");
 
-    /* Redirect cURL from the base URL to "/datasets/<id>/value" to write the value out */
-    if ((url_len = snprintf(
-             request_url, URL_MAX_LENGTH, "%s/datasets/%s/value%s%s", base_URL, dataset->URI,
-             is_transfer_binary && selection_body && (H5S_SEL_POINTS != sel_type) ? "?select=" : "",
-             is_transfer_binary && selection_body && (H5S_SEL_POINTS != sel_type) ? selection_body : "")) < 0)
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_SYSERRSTR, FAIL, "snprintf error");
+        curl_easy_handles[i] = curl_easy_duphandle(curl);
 
-    if (url_len >= URL_MAX_LENGTH)
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_SYSERRSTR, FAIL, "dataset write URL size exceeded maximum URL size");
+        if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_WRITEFUNCTION,
+                                         H5_rest_curl_write_data_callback_no_global))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set up non global curl write callback: %s",
+                            curl_err_buf);
 
-#ifdef RV_CONNECTOR_DEBUG
-    printf("-> Dataset write URL: %s\n\n", request_url);
-#endif
+        if (NULL == (response_buffers[i].buffer = (char *)RV_malloc(CURL_RESPONSE_BUFFER_DEFAULT_SIZE)))
+            FUNC_GOTO_ERROR(H5E_VOL, H5E_CANTALLOC, FAIL, "can't allocate cURL response buffers");
 
-    /* If using a point selection, instruct cURL to perform a POST request in order to post the
-     * point list. Otherwise, a PUT request is made to the server.
-     */
-    if (H5S_SEL_POINTS == sel_type) {
-        const char *const fmt_string = "{%s,\"value_base64\": \"%s\"}";
-        size_t            value_body_len;
-        int               bytes_printed;
-
-        /* Since base64 encoding generally introduces 33% overhead for encoding,
-         * go ahead and allocate a buffer 4/3 the size of the given write buffer
-         * in order to try and avoid reallocations inside the encoding function.
-         */
-        value_body_len = ((double)4.0 / 3.0) * write_body_len;
-        if (NULL == (base64_encoded_value = RV_malloc(value_body_len)))
+        if ((curl_err_bufs[i] = calloc(1, CURL_ERROR_SIZE)) == NULL)
             FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL,
-                            "can't allocate temporary buffer for base64-encoded write buffer");
+                            "failed to allocate memory for curl err buffers");
 
-        if (RV_base64_encode(buf[0], write_body_len, &base64_encoded_value, &value_body_len) < 0)
-            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTENCODE, FAIL, "can't base64-encode write buffer");
+        if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_ERRORBUFFER, curl_err_bufs[i]))
+            FUNC_GOTO_ERROR(H5E_VOL, H5E_CANTSET, FAIL, "can't set cURL error buffer");
+
+        response_buffers[i].buffer_size  = CURL_RESPONSE_BUFFER_DEFAULT_SIZE;
+        response_buffers[i].curr_buf_ptr = response_buffers[i].buffer;
+
+        if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_WRITEDATA, &response_buffers[i]))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set up non global curl write data: %s",
+                            curl_err_buf);
+
+        mem_space_id[i] = _mem_space_id[i];
+        file_space_id[i] = _file_space_id[i];
+        curl_headers_arr[i] = NULL;
+        host_header_arr[i]  = NULL;
+    }
 
 #ifdef RV_CONNECTOR_DEBUG
-        printf("-> Base64-encoded data buffer: %s\n\n", base64_encoded_value);
+    printf("-> Received dataset %swrite call with following parameters:\n", (count > 1) ? "multi-" : "");
+
+    for (size_t i = 0; i < count; i++) {
+        printf("     - Dataset%zu's URI: %s\n", i, datasets[i]->URI);
+        printf("     - Dataset%zu's object type: %s\n", i, object_type_to_string(datasets[i]->obj_type));
+        printf("     - Dataset%zu's domain path: %s\n", i, datasets[i]->domain->u.file.filepath_name);
+        printf("     - Entire memory dataspace selected? %s\n", (mem_space_id[i] == H5S_ALL) ? "yes" : "no");
+        printf("     - Entire file dataspace selected? %s\n", (file_space_id[i] == H5S_ALL) ? "yes" : "no");
+    }
+    printf("     - Default DXPL? %s\n", (dxpl_id == H5P_DATASET_XFER_DEFAULT) ? "yes" : "no");
+    printf("     - Multi-write? %s\n", (count > 1) ? "yes" : "no");
 #endif
 
-        write_body_len = (strlen(fmt_string) - 4) + selection_body_len + value_body_len;
-        if (NULL == (write_body = RV_malloc(write_body_len + 1)))
-            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "can't allocate space for write buffer");
+    /* Iterate over datasets to write to */
+    for (size_t i = 0; i < count; i++) {
 
-        if ((bytes_printed = snprintf(write_body, write_body_len + 1, fmt_string, selection_body,
-                                      base64_encoded_value)) < 0)
+        /* Determine whether it's possible to send the data as a binary blob instead of as JSON */
+        if (H5T_NO_CLASS == (dtype_class = H5Tget_class(mem_type_id[i])))
+            FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL, "a given memory datatype is invalid");
+
+        if ((is_variable_str = H5Tis_variable_str(mem_type_id[i])) < 0)
+            FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL, "a given memory datatype is invalid");
+        /* Only perform a binary transfer for fixed-length datatype datasets with an
+         * All or Hyperslab selection. Point selections are dealt with by POSTing the
+         * point list as JSON in the request body.
+         */
+        is_transfer_binary = (H5T_VLEN != dtype_class) && !is_variable_str;
+
+        /* Follow the semantics for the use of H5S_ALL */
+        if (H5S_ALL == mem_space_id[i] && H5S_ALL == file_space_id[i]) {
+            /* The file dataset's dataspace is used for the memory dataspace
+             * and the selection within the memory dataspace is set to the
+             * "all" selection. The selection within the file dataset's
+             * dataspace is set to the "all" selection.
+             */
+            mem_space_id[i] = file_space_id[i] = datasets[i]->u.dataset.space_id;
+            H5Sselect_all(file_space_id[i]);
+        } /* end if */
+        else if (H5S_ALL == file_space_id[i]) {
+            /* mem_space_id specifies the memory dataspace and the selection
+             * within it. The selection within the file dataset's dataspace
+             * is set to the "all" selection.
+             */
+            file_space_id[i] = datasets[i]->u.dataset.space_id;
+            H5Sselect_all(file_space_id[i]);
+        } /* end if */
+        else {
+            /* The file dataset's dataspace is used for the memory dataspace
+             * and the selection specified with file_space_id specifies the
+             * selection within it. The combination of the file dataset's
+             * dataspace and the selection from file_space_id is used for
+             * memory also.
+             */
+            if (H5S_ALL == mem_space_id[i]) {
+                mem_space_id[i] = datasets[i]->u.dataset.space_id;
+
+                /* Copy the selection from file_space_id into the mem_space_id */
+                if (H5Sselect_copy(mem_space_id[i], file_space_id[i]) < 0)
+                    FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_CANTCOPY, FAIL,
+                                    "can't copy selection from file space to memory space");
+            } /* end if */
+
+            /* Since the selection in the dataset's file dataspace is not set
+             * to "all", convert the selection into JSON */
+
+            /* Retrieve the selection type here for later use */
+            if (H5S_SEL_ERROR == (sel_type = H5Sget_select_type(file_space_id[i])))
+                FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_CANTGET, FAIL, "can't get dataspace selection type");
+            is_transfer_binary = is_transfer_binary && (H5S_SEL_POINTS != sel_type);
+
+            if (RV_convert_dataspace_selection_to_string(file_space_id[i], &selection_body,
+                                                         &selection_body_len, is_transfer_binary) < 0)
+                FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_CANTCONVERT, FAIL,
+                                "can't convert dataspace selection to string representation");
+        } /* end else */
+
+        /* Verify that the number of selected points matches */
+        if ((mem_select_npoints = H5Sget_select_npoints(mem_space_id[i])) < 0)
+            FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL, "memory dataspace is invalid");
+        if ((file_select_npoints = H5Sget_select_npoints(file_space_id[i])) < 0)
+            FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL, "file dataspace is invalid");
+        if (mem_select_npoints != file_select_npoints)
+            FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL,
+                            "memory selection num points != file selection num points");
+
+#ifdef RV_CONNECTOR_DEBUG
+        printf("-> %lld points selected in file dataspace\n", file_select_npoints);
+        printf("-> %lld points selected in memory dataspace\n\n", mem_select_npoints);
+#endif
+
+        /* Setup the size of the data being transferred and the data buffer itself (for non-simple
+         * types like object references or variable length types)
+         */
+        if ((H5T_REFERENCE != dtype_class) && (H5T_VLEN != dtype_class) && !is_variable_str) {
+            size_t dtype_size;
+
+            if (0 == (dtype_size = H5Tget_size(mem_type_id[i])))
+                FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL, "memory datatype is invalid");
+
+            write_body_len = (size_t)file_select_npoints * dtype_size;
+        } /* end if */
+        else {
+            if (H5T_STD_REF_OBJ == mem_type_id[i]) {
+                /* Convert the buffer of rest_obj_ref_t's to a binary buffer */
+                if (RV_convert_obj_refs_to_buffer((const rv_obj_ref_t *)buf[i], (size_t)file_select_npoints,
+                                                  &(write_bodies[i]), &write_body_len) < 0)
+                    FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_CANTCONVERT, FAIL,
+                                    "can't convert object ref/s to ref string/s");
+                buf[i] = write_bodies[i];
+            } /* end if */
+        }     /* end else */
+
+        /* Setup the host header */
+        host_header_len = strlen(datasets[i]->domain->u.file.filepath_name) + strlen(host_string) + 1;
+        if (NULL == (host_header_arr[i] = (char *)RV_malloc(host_header_len)))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "can't allocate space for request Host header");
+
+        strcpy(host_header_arr[i], host_string);
+
+        curl_headers_arr[i] = curl_slist_append(
+            curl_headers_arr[i], strncat(host_header_arr[i], datasets[i]->domain->u.file.filepath_name,
+                                         host_header_len - strlen(host_string) - 1));
+
+        /* Disable use of Expect: 100 Continue HTTP response */
+        curl_headers_arr[i] = curl_slist_append(curl_headers_arr[i], "Expect:");
+
+        /* Instruct cURL on which type of transfer to perform, binary or JSON */
+        curl_headers_arr[i] = curl_slist_append(curl_headers_arr[i],
+                                                is_transfer_binary ? "Content-Type: application/octet-stream"
+                                                                   : "Content-Type: application/json");
+
+        /* Redirect cURL from the base URL to "/datasets/<id>/value" to write the value out */
+        if ((url_len = snprintf(
+                 request_urls[i], URL_MAX_LENGTH, "%s/datasets/%s/value%s%s", base_URL, datasets[i]->URI,
+                 is_transfer_binary && selection_body && (H5S_SEL_POINTS != sel_type) ? "?select=" : "",
+                 is_transfer_binary && selection_body && (H5S_SEL_POINTS != sel_type) ? selection_body
+                                                                                      : "")) < 0)
             FUNC_GOTO_ERROR(H5E_DATASET, H5E_SYSERRSTR, FAIL, "snprintf error");
 
-#ifdef RV_CONNECTOR_DEBUG
-        printf("-> Write body: %s\n\n", write_body);
-#endif
-
-        if (bytes_printed >= write_body_len + 1)
+        if (url_len >= URL_MAX_LENGTH)
             FUNC_GOTO_ERROR(H5E_DATASET, H5E_SYSERRSTR, FAIL,
-                            "point selection write buffer exceeded allocated buffer size");
-
-        curl_headers = curl_slist_append(curl_headers, "Content-Type: application/json");
+                            "dataset write URL size exceeded maximum URL size");
 
 #ifdef RV_CONNECTOR_DEBUG
-        printf("-> Setup cURL to POST point list for dataset write\n\n");
+        printf("-> Dataset write URL: %s\n\n", request_urls[0]);
 #endif
-    } /* end if */
 
-    uinfo.buffer      = is_transfer_binary ? buf[0] : write_body;
-    uinfo.buffer_size = write_body_len;
-    uinfo.bytes_sent  = 0;
+        /* If using a point selection, instruct cURL to perform a POST request in order to post the
+         * point list. Otherwise, a PUT request is made to the server.
+         */
+        if (H5S_SEL_POINTS == sel_type) {
+            const char *const fmt_string = "{%s,\"value_base64\": \"%s\"}";
+            size_t            value_body_len;
+            int               bytes_printed;
 
-    /* Check to make sure that the size of the write body can safely be cast to a curl_off_t */
-    if (sizeof(curl_off_t) < sizeof(size_t))
-        ASSIGN_TO_SMALLER_SIZE(write_len, curl_off_t, write_body_len, size_t)
-    else if (sizeof(curl_off_t) > sizeof(size_t))
-        write_len = (curl_off_t)write_body_len;
-    else
-        ASSIGN_TO_SAME_SIZE_UNSIGNED_TO_SIGNED(write_len, curl_off_t, write_body_len, size_t)
+            /* Since base64 encoding generally introduces 33% overhead for encoding,
+             * go ahead and allocate a buffer 4/3 the size of the given write buffer
+             * in order to try and avoid reallocations inside the encoding function.
+             */
+            value_body_len = ((double)4.0 / 3.0) * write_body_len;
+            if (NULL == (base64_encoded_values[i] = RV_malloc(value_body_len)))
+                FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL,
+                                "can't allocate temporary buffer for base64-encoded write buffer");
 
-    if (CURLE_OK != curl_easy_setopt(curl, CURLOPT_UPLOAD, 1))
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set up cURL to make HTTP PUT request: %s",
-                        curl_err_buf);
-    if (CURLE_OK != curl_easy_setopt(curl, CURLOPT_READDATA, &uinfo))
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL PUT data: %s", curl_err_buf);
-    if (CURLE_OK != curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, write_len))
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL PUT data size: %s", curl_err_buf);
-    if (CURLE_OK != curl_easy_setopt(curl, CURLOPT_HTTPHEADER, curl_headers))
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL HTTP headers: %s", curl_err_buf);
-    if (CURLE_OK != curl_easy_setopt(curl, CURLOPT_URL, request_url))
-        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL request URL: %s", curl_err_buf);
+            if (RV_base64_encode(buf[i], write_body_len, &(base64_encoded_values[i]), &value_body_len) < 0)
+                FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTENCODE, FAIL, "can't base64-encode write buffer");
+
+#ifdef RV_CONNECTOR_DEBUG
+            printf("-> Base64-encoded data buffer: %s\n\n", base64_encoded_values[i]);
+#endif
+
+            write_body_len = (strlen(fmt_string) - 4) + selection_body_len + value_body_len;
+            if (NULL == (write_bodies[i] = RV_malloc(write_body_len + 1)))
+                FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "can't allocate space for write buffer");
+
+            if ((bytes_printed = snprintf(write_bodies[i], write_body_len + 1, fmt_string, selection_body,
+                                          base64_encoded_values[i])) < 0)
+                FUNC_GOTO_ERROR(H5E_DATASET, H5E_SYSERRSTR, FAIL, "snprintf error");
+
+#ifdef RV_CONNECTOR_DEBUG
+            printf("-> Write body: %s\n\n", write_bodies[i]);
+#endif
+
+            if (bytes_printed >= write_body_len + 1)
+                FUNC_GOTO_ERROR(H5E_DATASET, H5E_SYSERRSTR, FAIL,
+                                "point selection write buffer exceeded allocated buffer size");
+
+            curl_headers_arr[i] = curl_slist_append(curl_headers_arr[i], "Content-Type: application/json");
+
+#ifdef RV_CONNECTOR_DEBUG
+            printf("-> Setup cURL to POST point list for dataset write\n\n");
+#endif
+        } /* end if */
+
+        uinfo_arr[i].buffer      = is_transfer_binary ? buf[i] : write_bodies[i];
+        uinfo_arr[i].buffer_size = write_body_len;
+        uinfo_arr[i].bytes_sent  = 0;
+
+        /* Check to make sure that the size of the write body can safely be cast to a curl_off_t */
+        if (sizeof(curl_off_t) < sizeof(size_t))
+            ASSIGN_TO_SMALLER_SIZE(write_len[i], curl_off_t, write_body_len, size_t)
+        else if (sizeof(curl_off_t) > sizeof(size_t))
+            write_len[i] = (curl_off_t)write_body_len;
+        else
+            ASSIGN_TO_SAME_SIZE_UNSIGNED_TO_SIGNED(write_len[i], curl_off_t, write_body_len, size_t)
+
+        if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_UPLOAD, 1))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set up cURL to make HTTP PUT request: %s",
+                            curl_err_buf);
+
+        if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_READDATA, &(uinfo_arr[i])))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL PUT data: %s", curl_err_buf);
+        if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_INFILESIZE_LARGE, write_len[i]))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL PUT data size: %s", curl_err_buf);
+        if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_HTTPHEADER, curl_headers_arr[i]))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL HTTP headers: %s", curl_err_buf);
+        if (CURLE_OK != curl_easy_setopt(curl_easy_handles[i], CURLOPT_URL, request_urls[i]))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set cURL request URL: %s", curl_err_buf);
+
+        if (write_len[i] > 0) {
+            if (CURLM_OK != curl_multi_add_handle(curl_multi_handle, curl_easy_handles[i]))
+                FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't add cURL handle: %s", curl_err_buf);
+        }
+
+        if (selection_body) {
+            RV_free(selection_body);
+            selection_body = NULL;
+        }
+    } /* End iteration over dsets to write to */
 
 #ifdef RV_CONNECTOR_DEBUG
     printf("-> Writing dataset\n\n");
@@ -938,32 +1304,162 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t mem_spac
     printf("   \\**********************************/\n\n");
 #endif
 
-    if (write_len > 0)
-        CURL_PERFORM(curl, H5E_DATASET, H5E_WRITEERROR, FAIL);
+    if (CURLM_OK != curl_multi_setopt(curl_multi_handle, CURLMOPT_MAX_HOST_CONNECTIONS, NUM_MAX_HOST_CONNS))
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "failed to set max concurrent streams: %s",
+                        curl_err_buf);
+
+    int      still_running = 1;
+    CURLMsg *curl_mult_msg = NULL;
+    size_t   fail_count    = 0;
+    int      msgq          = 0;
+       
+    while (still_running || fail_count > 0) {
+        fail_count             = 0;
+        size_t events_occurred = 0;
+
+        if (CURLM_OK != curl_multi_perform(curl_multi_handle, &still_running))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "cURL multi perform error");
+
+        if (still_running) {
+            if (CURLM_OK != curl_multi_poll(curl_multi_handle, NULL, 0, 1000, &events_occurred))
+                FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "cURL multi poll error");
+
+#ifdef RV_CONNECTOR_DEBUG
+            printf("%zu events occurred\n", events_occurred);
+#endif
+        }
+
+        while (curl_mult_msg = curl_multi_info_read(curl_multi_handle, &msgq)) {
+            long response_code;
+
+            if (curl_mult_msg && (curl_mult_msg->msg == CURLMSG_DONE)) {
+                if (CURLE_OK !=
+                    curl_easy_getinfo(curl_mult_msg->easy_handle, CURLINFO_RESPONSE_CODE, &response_code))
+                    FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "can't get HTTP response code");
+
+#ifdef RV_CONNECTOR_DEBUG
+printf(" RV_dataset_write to %zu elements received %zu response\n", count, response_code);
+#endif
+                
+                /* Gracefully handle 503 Error, which can result from sending too many simultaneous
+                    * requests */
+                /* TODO - Incremental backoff and eventual fail */
+                if (response_code == 503) {
+                    fail_count++;
+
+                    size_t handle_index = 0;
+
+                    if (RV_get_index_of_matching_handle(curl_easy_handles, count, curl_mult_msg->easy_handle, &handle_index) < 0)
+                        FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "can't get handle information for retry");
+
+                    /* Restart request next time */
+                    uinfo_arr[handle_index].bytes_sent = 0;
+                    curl_multi_remove_handle(curl_multi_handle, curl_mult_msg->easy_handle);
+                    curl_multi_add_handle(curl_multi_handle, curl_mult_msg->easy_handle);
+
+                }
+                else if (response_code == 200) {
+                    /* Clean up resources used for the completed handle */
+                    char *url = NULL;
+
+                    if (CURLE_OK !=
+                        curl_easy_getinfo(curl_mult_msg->easy_handle, CURLINFO_EFFECTIVE_URL, &url))
+                        FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL,
+                                        "can't get original handle URL");
+
+                    size_t handle_index = 0;
+
+                    if (RV_get_index_of_matching_handle(curl_easy_handles, count, curl_mult_msg->easy_handle, &handle_index) < 0)
+                        FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "can't get handle information for retry");
+
+                    if (CURLM_OK !=
+                        curl_multi_remove_handle(curl_multi_handle, curl_mult_msg->easy_handle))
+                        FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL,
+                                        "failed to remove finished cURL handle");
+
+                    curl_easy_cleanup(curl_mult_msg->easy_handle);
+
+                    curl_easy_handles[handle_index] = NULL;
+
+                    RV_free(write_bodies[handle_index]);
+                    write_bodies[handle_index] = NULL;
+
+                    RV_free(request_urls[handle_index]);
+                    request_urls[handle_index] = NULL;
+
+                    RV_free(base64_encoded_values[handle_index]);
+                    base64_encoded_values[handle_index] = NULL;
+
+                    RV_free(response_buffers[handle_index].buffer);
+                    response_buffers[handle_index].buffer = NULL;
+
+                    RV_free(curl_err_bufs[handle_index]);
+                    curl_err_bufs[handle_index] = NULL;
+                }
+                else {
+                    HANDLE_RESPONSE(response_code, H5E_DATASET, H5E_WRITEERROR, FAIL);
+                }
+            }
+        } /* end while (curl_mult_msg); */
+
+    } /* end while (still_running || fail_count > 0); */
+
+#ifdef RV_CONNECTOR_DEBUG
+        printf("%zu handles failed%s\n", fail_count, (fail_count > 0) ? ", retrying..." : "");
+#endif
+
+    /* Repeated serial requests */
+    /*
+    for (size_t i = 0; i < count; i++) {
+        if (write_len[i] > 0) {
+            CURL_PERFORM_NO_GLOBAL(curl_easy_handles[i], response_buffers[i], H5E_DATASET, H5E_WRITEERROR,
+    FAIL);
+        }
+    }
+    */
 
 done:
 #ifdef RV_CONNECTOR_DEBUG
     printf("-> Dataset write response buffer:\n%s\n\n", response_buffer.buffer);
 #endif
 
-    if (base64_encoded_value)
-        RV_free(base64_encoded_value);
-    if (host_header)
-        RV_free(host_header);
-    if (write_body)
-        RV_free(write_body);
-    if (selection_body)
-        RV_free(selection_body);
+    for (size_t i = 0; i < count; i++) {
+        if (curl_headers_arr[i]) {
+            curl_slist_free_all(curl_headers_arr[i]);
+            curl_headers_arr[i] = NULL;
+        }
 
-    /* Unset cURL UPLOAD option to ensure that future requests don't try to use PUT calls */
-    if (CURLE_OK != curl_easy_setopt(curl, CURLOPT_UPLOAD, 0))
-        FUNC_DONE_ERROR(H5E_ATTR, H5E_CANTSET, FAIL, "can't unset cURL PUT option: %s", curl_err_buf);
+        /* May have been cleaned up during execution */
+        if (curl_easy_handles[i]) {
+            curl_multi_remove_handle(curl_multi_handle, curl_easy_handles[i]);
+            curl_easy_cleanup(curl_easy_handles[i]);
+        }
 
-    if (curl_headers) {
-        curl_slist_free_all(curl_headers);
-        curl_headers = NULL;
-    } /* end if */
+        RV_free(write_bodies[i]);
+        RV_free(request_urls[i]);
+        RV_free(base64_encoded_values[i]);
+        RV_free(response_buffers[i].buffer);
+        RV_free(curl_err_bufs[i]);
 
+        if (host_header_arr[i])
+            RV_free(host_header_arr[i]);
+    }
+
+    curl_multi_cleanup(curl_multi_handle);
+
+    RV_free(base64_encoded_values);
+    RV_free(response_buffers);
+    RV_free(curl_headers_arr);
+    RV_free(host_header_arr);
+    RV_free(curl_err_bufs);
+    RV_free(write_bodies);
+    RV_free(request_urls);
+    RV_free(curl_easy_handles);
+    RV_free(write_len);
+    RV_free(uinfo_arr);
+    RV_free(datasets);
+    RV_free(mem_space_id);
+    RV_free(file_space_id);
     PRINT_ERROR_STACK;
 
     return ret_value;
@@ -3707,8 +4203,8 @@ done:
 /*-------------------------------------------------------------------------
  * Function:    dataset_read_scatter_op
  *
- * Purpose:     Callback for H5Dscatter() to scatter the read data into the
- *              supplied buffer
+ * Purpose:     Callback for H5Dscatter() to scatter the given read buffer
+ *              into the supplied destination buffer
  *
  * Return:      Non-negative on success/Negative on failure
  *
@@ -3718,8 +4214,43 @@ done:
 static herr_t
 dataset_read_scatter_op(const void **src_buf, size_t *src_buf_bytes_used, void *op_data)
 {
-    *src_buf            = response_buffer.buffer;
-    *src_buf_bytes_used = *((size_t *)op_data);
+    response_read_info *resp_info = (response_read_info *)op_data;
+    *src_buf                      = resp_info->response_buf->buffer;
+    *src_buf_bytes_used           = *((size_t *)resp_info->read_size);
 
     return 0;
 } /* end dataset_read_scatter_op() */
+
+/* Return the index of the curl handle whose URL matches the URL of the given handle*/
+herr_t RV_get_index_of_matching_handle(CURL **curl_handles, size_t count, CURL *handle, size_t *handle_index) {
+
+    herr_t ret_value = SUCCEED;
+    char *target_url = NULL;
+    char *other_url = NULL;
+
+    if (!handle)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_BADVALUE, FAIL, "cURL handle provided for index match is NULL");
+
+    if (CURLE_OK != curl_easy_getinfo(handle, CURLINFO_EFFECTIVE_URL, &target_url))
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_BADVALUE, FAIL, "can't get target URL");
+
+    *handle_index = count + 1;
+
+    for (size_t i = 0; i < count; i++) {
+        /* May have been cleaned up early after successful request */
+        if (!curl_handles[i]) {
+            continue;
+        }
+        
+        if (CURLE_OK != curl_easy_getinfo(curl_handles[i], CURLINFO_EFFECTIVE_URL, &other_url))
+            FUNC_GOTO_ERROR(H5E_DATASET, H5E_BADVALUE, FAIL, "can't get original handle URL");
+
+        if (!strcmp(target_url, other_url)) {
+            if (*handle_index <= count)
+                FUNC_GOTO_ERROR(H5E_DATASET, H5E_BADVALUE, FAIL, "H5Dread_multi/H5Dwrite_multi cannot make multiple requests to the same dataset");
+            *handle_index = i;
+        }
+    }
+done:
+    return ret_value;
+}
