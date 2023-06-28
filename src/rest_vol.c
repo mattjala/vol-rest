@@ -29,10 +29,6 @@
 /* Default size for buffer used when transforming an HDF5 dataspace into JSON. */
 #define DATASPACE_SHAPE_BUFFER_DEFAULT_SIZE 256
 
-/* Default initial size for the response buffer allocated which cURL writes
- * its responses into
- */
-#define CURL_RESPONSE_BUFFER_DEFAULT_SIZE 1024
 /*
  * The VOL connector identification number.
  */

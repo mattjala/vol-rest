@@ -219,9 +219,6 @@
         } /* end if */                                                                                       \
     } while (0)
 
-/* TODO - Make this a macro agian*/
-herr_t curl_multi_perform_x(CURL *curl_multi_ptr, CURL **original_handles, size_t count);
-
 /* Counterpart of CURL_PERFORM that takes a curl multi handle,
  * and waits until all requests on it have finished before returning. */
 
@@ -412,6 +409,11 @@ extern char curl_err_buf[];
  * cURL header list
  */
 extern struct curl_slist *curl_headers;
+
+/* Default initial size for the response buffer allocated which cURL writes
+ * its responses into
+ */
+#define CURL_RESPONSE_BUFFER_DEFAULT_SIZE 1024
 
 /*
  * Saved copy of the base URL for operating on
