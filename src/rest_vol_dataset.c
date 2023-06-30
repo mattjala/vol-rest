@@ -76,7 +76,7 @@ const char *external_storage_keys[]       = {"externalStorage", (const char *)0}
 #define NUM_MAX_HOST_CONNS       25
 #define BACKOFF_INITIAL_DURATION 10000000 /* 10,000,000 ns -> 0.01 sec */
 #define BACKOFF_SCALE_FACTOR     1.5
-#define BACKOFF_MAX_BEFORE_FAIL  4000000000 /* 4,000,000,000 ns -> 4 sec */
+#define BACKOFF_MAX_BEFORE_FAIL  3000000000 /* 30,000,000,000 ns -> 30 sec */
 
 /* Default sizes for strings formed when dealing with turning a
  * representation of an HDF5 dataspace and a selection within one into JSON
@@ -436,7 +436,7 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
     curl_off_t             *post_len_arr     = NULL;
     RV_object_t           **datasets         = (RV_object_t **)dset;
     H5T_class_t             dtype_class;
-    hssize_t                mem_select_npoints, file_select_npoints;
+    hssize_t               *mem_select_npoints, *file_select_npoints;
     hid_t                  *mem_space_id = NULL, *file_space_id = NULL;
     hbool_t                 is_transfer_binary = FALSE;
     htri_t                  is_variable_str;
@@ -512,6 +512,12 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
     if ((post_len_arr = calloc(count, sizeof(H5S_sel_type *))) == NULL)
         FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for post lengths");
 
+    if ((file_select_npoints = calloc(count, sizeof(hsize_t))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for file selection npoints");
+
+    if ((mem_select_npoints = calloc(count, sizeof(hsize_t))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for memory selection npoints");
+
     /* Copy mspace and fspace arrays to local copy, to avoid modifying user's arrays */
     if ((mem_space_id = calloc(count, sizeof(hid_t *))) == NULL)
         FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL,
@@ -555,7 +561,7 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
             FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "can't set up non global curl write data: %s",
                             curl_err_buf);
 
-        mem_space_id[i]  = _mem_space_id[i];
+        mem_space_id[i] = _mem_space_id[i];
         file_space_id[i] = _file_space_id[i];
     }
 
@@ -626,17 +632,17 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
         } /* end else */
 
         /* Verify that the number of selected points matches */
-        if ((mem_select_npoints = H5Sget_select_npoints(mem_space_id[i])) < 0)
+        if ((mem_select_npoints[i] = H5Sget_select_npoints(mem_space_id[i])) < 0)
             FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL, "memory dataspace is invalid");
-        if ((file_select_npoints = H5Sget_select_npoints(file_space_id[i])) < 0)
+        if ((file_select_npoints[i] = H5Sget_select_npoints(file_space_id[i])) < 0)
             FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL, "file dataspace is invalid");
-        if (mem_select_npoints != file_select_npoints)
+        if (mem_select_npoints[i] != file_select_npoints[i])
             FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL,
                             "memory selection num points != file selection num points");
 
 #ifdef RV_CONNECTOR_DEBUG
-        printf("-> %lld points selected in file dataspace\n", file_select_npoints);
-        printf("-> %lld points selected in memory dataspace\n\n", mem_select_npoints);
+        printf("-> %lld points selected in file dataspace\n", file_select_npoints[i]);
+        printf("-> %lld points selected in memory dataspace\n\n", mem_select_npoints[i]);
 #endif
 
         /* Setup the host header */
@@ -857,10 +863,14 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
 
                         /* Scatter the read data out to the supplied read buffer according to the
                          * mem_type_id and mem_space_id given */
-                        read_data_size = (size_t)file_select_npoints * dtype_size;
+                        read_data_size = (size_t)file_select_npoints[handle_index] * dtype_size;
                         struct response_read_info resp_info;
                         resp_info.response_buf = &response_buffers[handle_index];
                         resp_info.read_size    = &read_data_size;
+
+#ifdef RV_CONNECTOR_DEBUG
+    printf(" Attempting to scatter data from read #%zu\n", handle_index);
+#endif
 
                         if (H5Dscatter(dataset_read_scatter_op, &resp_info, mem_type_id[handle_index],
                                        mem_space_id[handle_index], buf[handle_index]) < 0)
@@ -871,7 +881,7 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
                         if (H5T_STD_REF_OBJ == mem_type_id[handle_index]) {
                             /* Convert the received binary buffer into a buffer of rest_obj_ref_t's */
                             if (RV_convert_buffer_to_obj_refs(
-                                    response_buffers[handle_index].buffer, (size_t)file_select_npoints,
+                                    response_buffers[handle_index].buffer, (size_t)file_select_npoints[handle_index],
                                     (rv_obj_ref_t **)&obj_ref_buf, &read_data_size) < 0)
                                 FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_CANTCONVERT, FAIL,
                                                 "can't convert ref string/s to object ref array");
@@ -954,6 +964,7 @@ done:
 
         if (host_header_arr && host_header_arr[i])
             RV_free(host_header_arr[i]);
+
     }
 
     curl_multi_cleanup(curl_multi_handle);
@@ -971,6 +982,8 @@ done:
     RV_free(failed_handles_to_retry);
     RV_free(current_backoff_duration);
     RV_free(time_of_fail);
+    RV_free(file_select_npoints);
+    RV_free(mem_select_npoints);
     PRINT_ERROR_STACK;
 
     return ret_value;
@@ -997,7 +1010,7 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
     upload_info  *uinfo_arr = NULL;
     H5T_class_t   dtype_class;
     curl_off_t   *write_len = NULL;
-    hssize_t      mem_select_npoints, file_select_npoints;
+    hssize_t     *mem_select_npoints, *file_select_npoints;
     hid_t        *mem_space_id = NULL, *file_space_id = NULL;
     hbool_t       is_transfer_binary = FALSE;
     htri_t        is_variable_str;
@@ -1067,6 +1080,12 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
     if ((file_space_id = calloc(count, sizeof(hid_t *))) == NULL)
         FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL,
                         "failed to allocate memory for file space pointers");
+    
+    if ((file_select_npoints = calloc(count, sizeof(hsize_t))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for file selection npoints");
+
+    if ((mem_select_npoints = calloc(count, sizeof(hsize_t))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for memory selection npoints");
 
     /* Initialize arrays */
     for (size_t i = 0; i < count; i++) {
@@ -1196,17 +1215,17 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
         } /* end else */
 
         /* Verify that the number of selected points matches */
-        if ((mem_select_npoints = H5Sget_select_npoints(mem_space_id[i])) < 0)
+        if ((mem_select_npoints[i] = H5Sget_select_npoints(mem_space_id[i])) < 0)
             FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL, "memory dataspace is invalid");
-        if ((file_select_npoints = H5Sget_select_npoints(file_space_id[i])) < 0)
+        if ((file_select_npoints[i] = H5Sget_select_npoints(file_space_id[i])) < 0)
             FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL, "file dataspace is invalid");
-        if (mem_select_npoints != file_select_npoints)
+        if (mem_select_npoints[i] != file_select_npoints[i])
             FUNC_GOTO_ERROR(H5E_DATASPACE, H5E_BADVALUE, FAIL,
                             "memory selection num points != file selection num points");
 
 #ifdef RV_CONNECTOR_DEBUG
-        printf("-> %lld points selected in file dataspace\n", file_select_npoints);
-        printf("-> %lld points selected in memory dataspace\n\n", mem_select_npoints);
+        printf("-> %lld points selected in file dataspace\n", file_select_npoints[i]);
+        printf("-> %lld points selected in memory dataspace\n\n", mem_select_npoints[i]);
 #endif
 
         /* Setup the size of the data being transferred and the data buffer itself (for non-simple
@@ -1218,12 +1237,12 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
             if (0 == (dtype_size = H5Tget_size(mem_type_id[i])))
                 FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL, "memory datatype is invalid");
 
-            write_body_len = (size_t)file_select_npoints * dtype_size;
+            write_body_len = (size_t)file_select_npoints[i] * dtype_size;
         } /* end if */
         else {
             if (H5T_STD_REF_OBJ == mem_type_id[i]) {
                 /* Convert the buffer of rest_obj_ref_t's to a binary buffer */
-                if (RV_convert_obj_refs_to_buffer((const rv_obj_ref_t *)buf[i], (size_t)file_select_npoints,
+                if (RV_convert_obj_refs_to_buffer((const rv_obj_ref_t *)buf[i], (size_t)file_select_npoints[i],
                                                   &(write_bodies[i]), &write_body_len) < 0)
                     FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_CANTCONVERT, FAIL,
                                     "can't convert object ref/s to ref string/s");
@@ -1570,6 +1589,8 @@ done:
     RV_free(failed_handles_to_retry);
     RV_free(current_backoff_duration);
     RV_free(time_of_fail);
+    RV_free(mem_select_npoints);
+    RV_free(file_select_npoints);
     PRINT_ERROR_STACK;
 
     return ret_value;
