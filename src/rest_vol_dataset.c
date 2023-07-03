@@ -48,6 +48,9 @@ struct response_read_info {
 /* H5Dscatter() callback for dataset reads */
 static herr_t dataset_read_scatter_op(const void **src_buf, size_t *src_buf_bytes_used, void *op_data);
 
+/* Return the index of the curl handle whose URL matches that of the given handle*/
+herr_t RV_get_index_of_matching_handle(CURL **curl_handles, size_t count, CURL *handle, size_t *handle_index);
+
 /* JSON keys to retrieve the various creation properties from a dataset */
 const char *creation_properties_keys[]    = {"creationProperties", (const char *)0};
 const char *alloc_time_keys[]             = {"allocTime", (const char *)0};
@@ -816,7 +819,7 @@ printf(" Attempting to scatter data from read #%zu\n", handle_index);
         CURLMsg *curl_multi_msg  = NULL;
         size_t   fail_count      = 0;
         size_t   succeed_count   = 0;
-        size_t   events_occurred = 0;
+        int  events_occurred = 0;
         size_t   num_finished    = 0;
         size_t   handle_index    = 0;
 
@@ -871,15 +874,16 @@ printf(" Attempting to scatter data from read #%zu\n", handle_index);
 
                         clock_gettime(CLOCK_MONOTONIC, &tms);
 
-                        time_of_fail[handle_index] = tms.tv_sec * 1000 * 1000 * 1000 + tms.tv_nsec;
+                        time_of_fail[handle_index] = (size_t) tms.tv_sec * 1000 * 1000 * 1000 + (size_t) tms.tv_nsec;
 
                         current_backoff_duration[handle_index] =
                             (current_backoff_duration[handle_index] == 0)
                                 ? BACKOFF_INITIAL_DURATION
-                                : (current_backoff_duration[handle_index] *= BACKOFF_SCALE_FACTOR);
+                                : (size_t) ((double) current_backoff_duration[handle_index] * BACKOFF_SCALE_FACTOR);
 
                         /* Randomize time to avoid doing all retry attempts at once */
-                        current_backoff_duration[handle_index] *= (1.0 + ((double)rand() / (double)RAND_MAX));
+                        int random_factor = rand();
+                        current_backoff_duration[handle_index] = (size_t)  ((double) current_backoff_duration[handle_index] * (1.0 + ((double)random_factor / (double)RAND_MAX)));
 
                         if (current_backoff_duration[handle_index] >= BACKOFF_MAX_BEFORE_FAIL)
                             FUNC_GOTO_ERROR(H5E_DATASET, H5E_READERROR, FAIL,
@@ -961,7 +965,7 @@ printf(" Attempting to scatter data from read #%zu\n", handle_index);
             * slow */
             struct timespec curr_time;
             clock_gettime(CLOCK_MONOTONIC, &curr_time);
-            size_t curr_time_ns = curr_time.tv_sec * 1000 * 1000 * 1000 + curr_time.tv_nsec;
+            size_t curr_time_ns = (size_t) curr_time.tv_sec * 1000 * 1000 * 1000 + (size_t) curr_time.tv_nsec;
 
             for (size_t i = 0; i < count; i++) {
                 if (failed_handles_to_retry[i] &&
@@ -1334,7 +1338,8 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
              * go ahead and allocate a buffer 4/3 the size of the given write buffer
              * in order to try and avoid reallocations inside the encoding function.
              */
-            value_body_len = ((double)4.0 / 3.0) * write_body_len;
+            value_body_len = (size_t) ((4.0 / 3.0) * (double) write_body_len);
+
             if (NULL == (base64_encoded_values[i] = RV_malloc(value_body_len)))
                 FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL,
                                 "can't allocate temporary buffer for base64-encoded write buffer");
@@ -1416,15 +1421,7 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
 
     /* Avoid the multi curl overhead in the single dataset case */
     if (count == 1 && expected_num_writes == 1) {
-        long response_code;
-
         CURL_PERFORM_NO_GLOBAL(curl_easy_handles[0], response_buffers[0], H5E_DATASET, H5E_WRITEERROR, FAIL);
-
-        if (CURLE_OK !=
-                    curl_easy_getinfo(curl_easy_handles[0], CURLINFO_RESPONSE_CODE, &response_code))
-                    FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "can't get HTTP response code");
-
-        HANDLE_RESPONSE(response_code, H5E_DATASET, H5E_WRITEERROR, FAIL);
     } else {
 
         if (CURLM_OK != curl_multi_setopt(curl_multi_handle, CURLMOPT_MAX_HOST_CONNECTIONS, NUM_MAX_HOST_CONNS))
@@ -1432,10 +1429,11 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
                             curl_err_buf);
 
         int      still_running  = 0;
+        int      num_curlm_msgs = 0;
+        int     events_occurred = 0;
         CURLMsg *curl_multi_msg = NULL;
         size_t   fail_count     = 0;
         size_t   succeed_count  = 0;
-        int      num_curlm_msgs = 0;
         size_t   num_finished   = 0;
         size_t   handle_index   = 0;
 
@@ -1456,8 +1454,6 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
         while (num_finished < expected_num_writes) {
             fail_count    = 0;
             succeed_count = 0;
-
-            size_t events_occurred = 0;
 
             if (CURLM_OK != curl_multi_perform(curl_multi_handle, &still_running))
                 FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "cURL multi perform error");
@@ -1503,15 +1499,16 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
 
                         clock_gettime(CLOCK_MONOTONIC, &tms);
 
-                        time_of_fail[handle_index] = tms.tv_sec * 1000 * 1000 * 1000 + tms.tv_nsec;
+                        time_of_fail[handle_index] = (size_t) tms.tv_sec * 1000 * 1000 * 1000 + (size_t) tms.tv_nsec;
 
                         current_backoff_duration[handle_index] =
                             (current_backoff_duration[handle_index] == 0)
                                 ? BACKOFF_INITIAL_DURATION
-                                : (current_backoff_duration[handle_index] *= BACKOFF_SCALE_FACTOR);
+                                : (size_t) ((double) current_backoff_duration[handle_index] * BACKOFF_SCALE_FACTOR);
 
                         /* Randomize time to avoid doing all retry attempts at once */
-                        current_backoff_duration[handle_index] *= (1.0 + ((double)rand() / (double)RAND_MAX));
+                        int random_factor = rand();
+                        current_backoff_duration[handle_index] = (size_t)  ((double) current_backoff_duration[handle_index] * (1.0 + ((double)random_factor / (double)RAND_MAX)));
 
                         if (current_backoff_duration[handle_index] >= BACKOFF_MAX_BEFORE_FAIL)
                             FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL,
@@ -1570,7 +1567,7 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
             * slow */
             struct timespec curr_time;
             clock_gettime(CLOCK_MONOTONIC, &curr_time);
-            size_t curr_time_ns = curr_time.tv_sec * 1000 * 1000 * 1000 + curr_time.tv_nsec;
+            size_t curr_time_ns = (size_t) curr_time.tv_sec * 1000 * 1000 * 1000 + (size_t) curr_time.tv_nsec;
 
             for (size_t i = 0; i < count; i++) {
                 if (failed_handles_to_retry[i] &&
@@ -4392,7 +4389,7 @@ dataset_read_scatter_op(const void **src_buf, size_t *src_buf_bytes_used, void *
     return 0;
 } /* end dataset_read_scatter_op() */
 
-/* Return the index of the curl handle whose URL matches the URL of the given handle*/
+/* Return the index of the curl handle whose URL matches that of the given handle*/
 herr_t
 RV_get_index_of_matching_handle(CURL **curl_handles, size_t count, CURL *handle, size_t *handle_index)
 {

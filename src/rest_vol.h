@@ -261,7 +261,6 @@
         } while (curl_mult_msg);                                                                             \
                                                                                                              \
     } while (still_running);                                                                                 \
-    \                                                                                                  
 
 /* Helper macro to find the matching JSON '}' symbol for a given '{' symbol. This macro is                   \
  * used to extract out all of the JSON within a JSON object so that processing can be done                   \
