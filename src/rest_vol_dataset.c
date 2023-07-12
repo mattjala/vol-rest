@@ -76,11 +76,11 @@ const char *external_storage_keys[]       = {"externalStorage", (const char *)0}
 #define OBJECT_REF_STRING_LEN                         48
 
 /* Defines for multi-CURL related settings */
-#define NUM_MAX_HOST_CONNS       25
-#define BACKOFF_INITIAL_DURATION 10000000 /* 10,000,000 ns -> 0.01 sec */
-#define BACKOFF_SCALE_FACTOR     1.5
-#define BACKOFF_MAX_BEFORE_FAIL  3000000000 /* 30,000,000,000 ns -> 30 sec */
-#define DELAY_BETWEEN_HANDLE_CHECKS 10000000 /* 10,000,000 ns -> 0.01 sec */
+#define NUM_MAX_HOST_CONNS          10
+#define BACKOFF_INITIAL_DURATION    10000000 /* 10,000,000 ns -> 0.01 sec */
+#define BACKOFF_SCALE_FACTOR        1.5
+#define BACKOFF_MAX_BEFORE_FAIL     3000000000 /* 30,000,000,000 ns -> 30 sec */
+#define DELAY_BETWEEN_HANDLE_CHECKS 10000000   /* 10,000,000 ns -> 0.01 sec */
 
 /* Default sizes for strings formed when dealing with turning a
  * representation of an HDF5 dataspace and a selection within one into JSON
@@ -827,9 +827,9 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
         size_t   handle_index    = 0;
 
         struct timespec delay;
-        delay.tv_sec = 0;
+        delay.tv_sec  = 0;
         delay.tv_nsec = DELAY_BETWEEN_HANDLE_CHECKS;
-        
+
         while (num_finished < count) {
             fail_count    = 0;
             succeed_count = 0;
@@ -993,7 +993,7 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
                 }
             }
 
-        nanosleep(&delay, NULL);
+            nanosleep(&delay, NULL);
         }
     }
 
@@ -1450,16 +1450,16 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
             FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "failed to set max concurrent streams: %s",
                             curl_err_buf);
 
-        int      still_running   = 0;
-        int      num_curlm_msgs  = 0;
-        int      events_occurred = 0;
-        CURLMsg *curl_multi_msg  = NULL;
-        size_t   fail_count      = 0;
-        size_t   succeed_count   = 0;
-        size_t   num_finished    = 0;
-        size_t   handle_index    = 0;
+        int             still_running   = 0;
+        int             num_curlm_msgs  = 0;
+        int             events_occurred = 0;
+        CURLMsg        *curl_multi_msg  = NULL;
+        size_t          fail_count      = 0;
+        size_t          succeed_count   = 0;
+        size_t          num_finished    = 0;
+        size_t          handle_index    = 0;
         struct timespec delay;
-        delay.tv_sec = 0;
+        delay.tv_sec  = 0;
         delay.tv_nsec = DELAY_BETWEEN_HANDLE_CHECKS;
 
         if ((failed_handles_to_retry = calloc(count, sizeof(CURL *))) == NULL)
@@ -1611,7 +1611,7 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
                 }
             }
 
-        nanosleep(&delay, NULL);
+            nanosleep(&delay, NULL);
         }
     }
 
