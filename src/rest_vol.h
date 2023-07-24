@@ -451,6 +451,11 @@ struct response_buffer {
 };
 extern struct response_buffer response_buffer;
 
+/* For HUG '23 Demo, to track and display how much of each dataset's read/write is completed over time
+during a multi read/write */
+extern curl_off_t *total_content_lengths;
+extern curl_off_t *curr_content_transferred;
+
 /**************************
  *                        *
  *        Typedefs        *
@@ -524,6 +529,7 @@ typedef struct {
     const void *buffer;
     size_t      buffer_size;
     size_t      bytes_sent;
+    size_t      dset_idx; /* Which dset's "Curr bytes sent/read" counter to update */
 } upload_info;
 
 /* Structure that keeps track of semantic version. */
@@ -601,6 +607,7 @@ typedef struct loc_info {
     char        *GCPL_base64;
     RV_object_t *domain;
 } loc_info;
+
 
 /****************************
  *                          *

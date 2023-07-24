@@ -1093,6 +1093,12 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
     CURL                  **curl_easy_handles        = NULL;
     char                  **curl_err_bufs            = NULL;
 
+    if ((total_content_lengths = calloc(count, sizeof(curl_off_t))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for curl info");
+
+    if ((curr_content_transferred = calloc(count, sizeof(curl_off_t))) == NULL)
+        FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for curl info");
+
     if ((curl_headers_arr = calloc(count, sizeof(struct curl_slist *))) == NULL)
         FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for curl headers");
 
@@ -1397,6 +1403,9 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
         uinfo_arr[i].buffer      = is_transfer_binary ? buf[i] : write_bodies[i];
         uinfo_arr[i].buffer_size = write_body_len;
         uinfo_arr[i].bytes_sent  = 0;
+        uinfo_arr[i].dset_idx = i;
+
+        total_content_lengths[i] = write_body_len;
 
         /* Check to make sure that the size of the write body can safely be cast to a curl_off_t */
         if (sizeof(curl_off_t) < sizeof(size_t))
@@ -1662,6 +1671,9 @@ done:
     RV_free(time_of_fail);
     RV_free(mem_select_npoints);
     RV_free(file_select_npoints);
+
+    RV_free(curr_content_transferred);
+    RV_free(total_content_lengths);
     PRINT_ERROR_STACK;
 
     return ret_value;

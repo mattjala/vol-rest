@@ -95,6 +95,11 @@ typedef struct H5_rest_ad_info_t {
     hbool_t unattended;
 } H5_rest_ad_info_t;
 
+/* For HUG '23 Demo, to track and display how much of each dataset's read/write is completed over time
+during a multi read/write */
+curl_off_t *total_content_lengths = NULL;
+curl_off_t *curr_content_transferred = NULL;
+
 /* Host header string for specifying the host (Domain) for requests */
 const char *const host_string = "X-Hdf-domain: ";
 
@@ -1325,6 +1330,26 @@ H5_rest_curl_read_data_callback(char *buffer, size_t size, size_t nmemb, void *i
         memcpy(buffer, (const char *)uinfo->buffer + uinfo->bytes_sent, data_size);
 
         uinfo->bytes_sent += data_size;
+
+        /* For HUG '23 Demo */
+#define CURSOR_UP fprintf(stderr, "\x1b[A");
+#define CURSOR_DOWN fprintf(stderr, "\n");
+
+        if (curr_content_transferred) {
+            for (size_t i = 0; i < uinfo->dset_idx; i++)
+                CURSOR_DOWN
+            
+            curr_content_transferred[uinfo->dset_idx] = uinfo->bytes_sent;
+            fprintf(stderr, "\rDset #%zu is now at %zu/%zu bytes written", uinfo->dset_idx, uinfo->bytes_sent, total_content_lengths[uinfo->dset_idx]);
+            usleep(50000);
+            
+            for (size_t i = 0; i < uinfo->dset_idx; i++)
+                CURSOR_UP
+            
+            // TODO: Progress bar
+
+        }
+
     } /* end if */
 
     return data_size;
