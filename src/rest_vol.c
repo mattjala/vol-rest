@@ -98,7 +98,6 @@ typedef struct H5_rest_ad_info_t {
 /* For HUG '23 Demo, to track and display how much of each dataset's read/write is completed over time
 during a multi read/write */
 curl_off_t *total_content_lengths = NULL;
-curl_off_t *curr_content_transferred = NULL;
 
 /* Host header string for specifying the host (Domain) for requests */
 const char *const host_string = "X-Hdf-domain: ";
@@ -1296,6 +1295,30 @@ done:
  *         Helper functions         *
  ************************************/
 
+/* For HUG '23 Demo */
+/* Allocates heap mem */
+#define BAR_LENGTH 25
+
+char *progress_string(size_t current, size_t total) {
+
+    char *prog = calloc(BAR_LENGTH + 1, sizeof(char));
+    prog[BAR_LENGTH] = '\0';
+
+    if (total == 0) {
+        exit(1);
+    }
+
+    double completion = (double) current / (double) total;
+    
+    size_t filled_chars = (size_t) (completion * BAR_LENGTH);
+
+    memset(prog, '-', BAR_LENGTH);
+    memset(prog, '#', filled_chars);
+
+    fprintf(stderr, "prog = %s", prog);
+done:
+    return prog;
+}
 /*-------------------------------------------------------------------------
  * Function:    H5_rest_curl_read_data_callback
  *
@@ -1335,12 +1358,15 @@ H5_rest_curl_read_data_callback(char *buffer, size_t size, size_t nmemb, void *i
 #define CURSOR_UP fprintf(stderr, "\x1b[A");
 #define CURSOR_DOWN fprintf(stderr, "\n");
 
-        if (curr_content_transferred) {
+        if (total_content_lengths) {
             for (size_t i = 0; i < uinfo->dset_idx; i++)
                 CURSOR_DOWN
             
-            curr_content_transferred[uinfo->dset_idx] = uinfo->bytes_sent;
-            fprintf(stderr, "\rDset #%zu is now at %zu/%zu bytes written", uinfo->dset_idx, uinfo->bytes_sent, total_content_lengths[uinfo->dset_idx]);
+            char *prog = progress_string(uinfo->bytes_sent, total_content_lengths[uinfo->dset_idx]);
+            size_t complete_percent = (size_t) ((double) uinfo->bytes_sent);
+            fprintf(stderr, "[%s] %zu%", prog, complete_percent);
+            
+            RV_free(prog);
             usleep(50000);
             
             for (size_t i = 0; i < uinfo->dset_idx; i++)
