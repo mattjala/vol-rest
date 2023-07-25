@@ -681,14 +681,15 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
                                                                       : "Accept: application/json");
 
         /* Redirect cURL from the base URL to "/datasets/<id>/value" to get the dataset data values */
-        if ((url_len = snprintf(
-                 request_urls[i], URL_MAX_LENGTH, "%s/datasets/%s/value%s%s", multi_base_URL[i % SN_COUNT], datasets[i]->URI,
-                 is_transfer_binary && selection_body_arr[i] && (H5S_SEL_POINTS != sel_type_arr[i])
-                     ? "?select="
-                     : "",
-                 is_transfer_binary && selection_body_arr[i] && (H5S_SEL_POINTS != sel_type_arr[i])
-                     ? selection_body_arr[i]
-                     : "")) < 0)
+        if ((url_len =
+                 snprintf(request_urls[i], URL_MAX_LENGTH, "%s/datasets/%s/value%s%s",
+                          multi_base_URL[i % SN_COUNT], datasets[i]->URI,
+                          is_transfer_binary && selection_body_arr[i] && (H5S_SEL_POINTS != sel_type_arr[i])
+                              ? "?select="
+                              : "",
+                          is_transfer_binary && selection_body_arr[i] && (H5S_SEL_POINTS != sel_type_arr[i])
+                              ? selection_body_arr[i]
+                              : "")) < 0)
             FUNC_GOTO_ERROR(H5E_DATASET, H5E_SYSERRSTR, FAIL, "snprintf error");
 
         if (url_len >= URL_MAX_LENGTH)
@@ -1350,7 +1351,8 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
 
         /* Redirect cURL from the base URL to "/datasets/<id>/value" to write the value out */
         if ((url_len = snprintf(
-                 request_urls[i], URL_MAX_LENGTH, "%s/datasets/%s/value%s%s", multi_base_URL[i % SN_COUNT], datasets[i]->URI,
+                 request_urls[i], URL_MAX_LENGTH, "%s/datasets/%s/value%s%s", multi_base_URL[i % SN_COUNT],
+                 datasets[i]->URI,
                  is_transfer_binary && selection_body && (H5S_SEL_POINTS != sel_type) ? "?select=" : "",
                  is_transfer_binary && selection_body && (H5S_SEL_POINTS != sel_type) ? selection_body
                                                                                       : "")) < 0)
