@@ -98,6 +98,7 @@ typedef struct H5_rest_ad_info_t {
 /* For HUG '23 Demo, to track and display how much of each dataset's read/write is completed over time
 during a multi read/write */
 curl_off_t *total_content_lengths = NULL;
+bool is_read = false;
 
 /* Host header string for specifying the host (Domain) for requests */
 const char *const host_string = "X-Hdf-domain: ";
@@ -1315,7 +1316,6 @@ char *progress_string(size_t current, size_t total) {
     memset(prog, '-', BAR_LENGTH);
     memset(prog, '#', filled_chars);
 
-    fprintf(stderr, "prog = %s", prog);
 done:
     return prog;
 }
@@ -1358,21 +1358,18 @@ H5_rest_curl_read_data_callback(char *buffer, size_t size, size_t nmemb, void *i
 #define CURSOR_UP fprintf(stderr, "\x1b[A");
 #define CURSOR_DOWN fprintf(stderr, "\n");
 
-        if (total_content_lengths) {
+        if (total_content_lengths && uinfo->dset_idx < 20) {
             for (size_t i = 0; i < uinfo->dset_idx; i++)
                 CURSOR_DOWN
             
             char *prog = progress_string(uinfo->bytes_sent, total_content_lengths[uinfo->dset_idx]);
-            size_t complete_percent = (size_t) ((double) uinfo->bytes_sent);
-            fprintf(stderr, "[%s] %zu%", prog, complete_percent);
+            size_t complete_percent = (size_t) (100 * (((double) uinfo->bytes_sent) / ((double) total_content_lengths[uinfo->dset_idx])));
+            fprintf(stderr, "\rDataset #%zu%s Write: [%s] %zu%%", uinfo->dset_idx, (uinfo->dset_idx < 10) ? " " : "", prog, complete_percent);
             
             RV_free(prog);
-            usleep(50000);
             
             for (size_t i = 0; i < uinfo->dset_idx; i++)
                 CURSOR_UP
-            
-            // TODO: Progress bar
 
         }
 
@@ -1490,6 +1487,24 @@ H5_rest_curl_write_data_callback_no_global(char *buffer, size_t size, size_t nme
     memcpy(local_response_buffer->curr_buf_ptr, buffer, data_size);
     local_response_buffer->curr_buf_ptr += data_size;
     *local_response_buffer->curr_buf_ptr = '\0';
+
+    /* HUG Demo '23*/
+    if (total_content_lengths[local_response_buffer->dset_idx] && is_read && local_response_buffer->dset_idx < 20) {
+        for (size_t i = 0; i < local_response_buffer->dset_idx; i++)
+            CURSOR_DOWN
+        
+        size_t bytes_read = ((size_t) buf_ptrdiff) + data_size;
+        char *prog = progress_string(bytes_read, total_content_lengths[local_response_buffer->dset_idx]);
+        
+        size_t complete_percent = (size_t) (100 * (((double) bytes_read) / ((double) total_content_lengths[local_response_buffer->dset_idx])));
+        fprintf(stderr, "\rDataset #%zu%s Read: [%s] %zu%%", local_response_buffer->dset_idx, (local_response_buffer->dset_idx < 10) ? " " : "", prog, complete_percent);
+        
+        RV_free(prog);
+        
+        for (size_t i = 0; i < local_response_buffer->dset_idx; i++)
+            CURSOR_UP
+
+    } /* end if */
 
     ret_value = data_size;
 

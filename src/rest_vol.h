@@ -146,7 +146,7 @@
                 FUNC_GOTO_ERROR(ERR_MAJOR, ERR_MINOR, ret_value, "504 - Gateway timeout");                   \
                 break;                                                                                       \
             default:                                                                                         \
-                FUNC_GOTO_ERROR(ERR_MAJOR, ERR_MINOR, ret_value, "Unknown error occurred");                  \
+                FUNC_GOTO_ERROR(ERR_MAJOR, ERR_MINOR, ret_value, "Unknown error occurred - HTTP %d", response_code);                  \
                 break;                                                                                       \
         } /* end switch */                                                                                   \
     } while (0)
@@ -448,14 +448,17 @@ struct response_buffer {
     char  *buffer;
     char  *curr_buf_ptr;
     size_t buffer_size;
+    /* For HUG '23 Demo */
+    size_t dset_idx;
 };
+
 extern struct response_buffer response_buffer;
 
 /* For HUG '23 Demo, to track and display how much of each dataset's read/write is completed over time
 during a multi read/write */
 extern curl_off_t *total_content_lengths;
 extern curl_off_t *curr_content_transferred;
-
+extern bool is_read;
 /**************************
  *                        *
  *        Typedefs        *

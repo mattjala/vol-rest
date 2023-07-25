@@ -76,10 +76,10 @@ const char *external_storage_keys[]       = {"externalStorage", (const char *)0}
 #define OBJECT_REF_STRING_LEN                         48
 
 /* Defines for multi-CURL related settings */
-#define NUM_MAX_HOST_CONNS          10
+#define NUM_MAX_HOST_CONNS          40
 #define BACKOFF_INITIAL_DURATION    10000000 /* 10,000,000 ns -> 0.01 sec */
 #define BACKOFF_SCALE_FACTOR        1.5
-#define BACKOFF_MAX_BEFORE_FAIL     3000000000 /* 30,000,000,000 ns -> 30 sec */
+#define BACKOFF_MAX_BEFORE_FAIL     30000000000 /* 30,000,000,000 ns -> 30 sec */
 #define DELAY_BETWEEN_HANDLE_CHECKS 10000000   /* 10,000,000 ns -> 0.01 sec */
 
 /* Default sizes for strings formed when dealing with turning a
@@ -462,6 +462,9 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
     char              **curl_err_bufs            = NULL;
     struct curl_slist **curl_headers_arr         = NULL;
 
+    is_read = true;
+    size_t wait_count = 0;
+
 #ifdef RV_CONNECTOR_DEBUG
     printf("-> Received dataset read call with following parameters:\n");
     for (size_t i = 0; i < count; i++) {
@@ -535,6 +538,8 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
 
     /* Initialize arrays and check arguments */
     for (size_t i = 0; i < count; i++) {
+        response_buffers[i].dset_idx = i;
+
         if (!buf[i])
             FUNC_GOTO_ERROR(H5E_ARGS, H5E_BADVALUE, FAIL, "given read buffer was NULL");
 
@@ -857,6 +862,7 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
                     /* Gracefully handle 503 Error, which can result from sending too many simultaneous
                      * requests */
                     if (response_code == 503) {
+                        wait_count++;
                         /* Identify the handle by its original index in the easy handle array*/
 
                         if (RV_get_index_of_matching_handle(curl_easy_handles, count,
@@ -999,6 +1005,8 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
 
 done:
 
+    fprintf(stderr, "\nWait count during read: %zu\n", wait_count);
+
     if (obj_ref_buf)
         RV_free(obj_ref_buf);
 
@@ -1042,6 +1050,8 @@ done:
     RV_free(time_of_fail);
     RV_free(file_select_npoints);
     RV_free(mem_select_npoints);
+
+    RV_free(total_content_lengths);
     PRINT_ERROR_STACK;
 
     return ret_value;
@@ -1445,6 +1455,8 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
     printf("   \\**********************************/\n\n");
 #endif
 
+    size_t wait_count = 0;
+
     /* Avoid the multi curl overhead in the single dataset case */
     if (count == 1 && expected_num_writes == 1) {
         CURL_PERFORM_NO_GLOBAL(curl_easy_handles[0], response_buffers[0], H5E_DATASET, H5E_WRITEERROR, FAIL);
@@ -1510,6 +1522,8 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
                     /* Gracefully handle 503 Error, which can result from sending too many simultaneous
                      * requests */
                     if (response_code == 503) {
+                        
+                        wait_count++;
 
                         if (RV_get_index_of_matching_handle(curl_easy_handles, count,
                                                             curl_multi_msg->easy_handle, &handle_index) < 0)
@@ -1534,6 +1548,10 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
                         time_of_fail[handle_index] =
                             (size_t)tms.tv_sec * 1000 * 1000 * 1000 + (size_t)tms.tv_nsec;
 
+                        if (current_backoff_duration[handle_index] >= BACKOFF_MAX_BEFORE_FAIL)
+                            FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL,
+                                            "Unable to reach server for write: 503 service unavailable");
+
                         current_backoff_duration[handle_index] =
                             (current_backoff_duration[handle_index] == 0)
                                 ? BACKOFF_INITIAL_DURATION
@@ -1546,9 +1564,6 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
                             (size_t)((double)current_backoff_duration[handle_index] *
                                      (1.0 + ((double)random_factor / (double)RAND_MAX)));
 
-                        if (current_backoff_duration[handle_index] >= BACKOFF_MAX_BEFORE_FAIL)
-                            FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL,
-                                            "Unable to reach server for write: 503 service unavailable");
 #ifdef RV_CONNECTOR_DEBUG
                         printf("Write handle %zu failed - waiting %zuns to retry\n", handle_index,
                                current_backoff_duration[handle_index]);
@@ -1590,6 +1605,7 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
                         curl_err_bufs[handle_index] = NULL;
                     }
                     else {
+                        fprintf(stderr, "Unexpected response from server: HTTP %ld", response_code);
                         HANDLE_RESPONSE(response_code, H5E_DATASET, H5E_WRITEERROR, FAIL);
                     }
                 }
@@ -1625,6 +1641,8 @@ done:
 #ifdef RV_CONNECTOR_DEBUG
     printf("-> Dataset write response buffer:\n%s\n\n", response_buffer.buffer);
 #endif
+
+    fprintf(stderr, "\nWait count during write: %zu\n", wait_count);
 
     for (size_t i = 0; i < count; i++) {
         if (curl_headers_arr[i]) {
@@ -1669,7 +1687,6 @@ done:
     RV_free(mem_select_npoints);
     RV_free(file_select_npoints);
 
-    RV_free(total_content_lengths);
     PRINT_ERROR_STACK;
 
     return ret_value;
