@@ -419,6 +419,8 @@ done:
     return ret_value;
 } /* end RV_dataset_open() */
 
+#define SN_COUNT strtol(getenv("SN_CORES"), NULL, 10)
+
 /*-------------------------------------------------------------------------
  * Function:    RV_dataset_read
  *
@@ -461,6 +463,14 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
     size_t             *time_of_fail             = NULL;
     char              **curl_err_bufs            = NULL;
     struct curl_slist **curl_headers_arr         = NULL;
+
+    char multi_base_URL[SN_COUNT][URL_MAX_LENGTH];
+
+    for (size_t i = 0; i < SN_COUNT; i++) {
+        memcpy(multi_base_URL[i], base_URL, strlen(base_URL) + 1);
+        snprintf(multi_base_URL[i] + strlen(base_URL) - 4, URL_MAX_LENGTH, "%zu", 5101 + i);
+        fprintf(stderr, "multi_base_URL[%zu] = %s\n", i, multi_base_URL[i]);
+    }
 
 #ifdef RV_CONNECTOR_DEBUG
     printf("-> Received dataset read call with following parameters:\n");
@@ -672,7 +682,7 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
 
         /* Redirect cURL from the base URL to "/datasets/<id>/value" to get the dataset data values */
         if ((url_len = snprintf(
-                 request_urls[i], URL_MAX_LENGTH, "%s/datasets/%s/value%s%s", base_URL, datasets[i]->URI,
+                 request_urls[i], URL_MAX_LENGTH, "%s/datasets/%s/value%s%s", multi_base_URL[i % SN_COUNT], datasets[i]->URI,
                  is_transfer_binary && selection_body_arr[i] && (H5S_SEL_POINTS != sel_type_arr[i])
                      ? "?select="
                      : "",
@@ -1093,6 +1103,14 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
     CURL                  **curl_easy_handles        = NULL;
     char                  **curl_err_bufs            = NULL;
 
+    char multi_base_URL[SN_COUNT][URL_MAX_LENGTH];
+
+    for (size_t i = 0; i < SN_COUNT; i++) {
+        memcpy(multi_base_URL[i], base_URL, strlen(base_URL) + 1);
+        snprintf(multi_base_URL[i] + strlen(base_URL) - 4, URL_MAX_LENGTH, "%zu", 5101 + i);
+        fprintf(stderr, "multi_base_URL[%zu] = %s\n", i, multi_base_URL[i]);
+    }
+
     if ((curl_headers_arr = calloc(count, sizeof(struct curl_slist *))) == NULL)
         FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL, "failed to allocate memory for curl headers");
 
@@ -1332,7 +1350,7 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
 
         /* Redirect cURL from the base URL to "/datasets/<id>/value" to write the value out */
         if ((url_len = snprintf(
-                 request_urls[i], URL_MAX_LENGTH, "%s/datasets/%s/value%s%s", base_URL, datasets[i]->URI,
+                 request_urls[i], URL_MAX_LENGTH, "%s/datasets/%s/value%s%s", multi_base_URL[i % SN_COUNT], datasets[i]->URI,
                  is_transfer_binary && selection_body && (H5S_SEL_POINTS != sel_type) ? "?select=" : "",
                  is_transfer_binary && selection_body && (H5S_SEL_POINTS != sel_type) ? selection_body
                                                                                       : "")) < 0)
