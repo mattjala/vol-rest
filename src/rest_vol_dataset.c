@@ -80,7 +80,7 @@ const char *external_storage_keys[]       = {"externalStorage", (const char *)0}
 #define BACKOFF_INITIAL_DURATION    10000000 /* 10,000,000 ns -> 0.01 sec */
 #define BACKOFF_SCALE_FACTOR        1.5
 #define BACKOFF_MAX_BEFORE_FAIL     30000000000 /* 30,000,000,000 ns -> 30 sec */
-#define DELAY_BETWEEN_HANDLE_CHECKS 500000   /* 10,000,000 ns -> 0.01 sec */
+#define DELAY_BETWEEN_HANDLE_CHECKS 500000      /* 10,000,000 ns -> 0.01 sec */
 
 /* Default sizes for strings formed when dealing with turning a
  * representation of an HDF5 dataspace and a selection within one into JSON
@@ -462,7 +462,7 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
     char              **curl_err_bufs            = NULL;
     struct curl_slist **curl_headers_arr         = NULL;
 
-    is_read = true;
+    is_read           = true;
     size_t wait_count = 0;
 
 #ifdef RV_CONNECTOR_DEBUG
@@ -775,8 +775,7 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
     printf("   \\***************************************/\n\n");
 #endif
 
-    if (CURLM_OK !=
-        curl_multi_setopt(curl_multi_handle, CURLMOPT_MAX_HOST_CONNECTIONS, NUM_MAX_HOST_CONNS))
+    if (CURLM_OK != curl_multi_setopt(curl_multi_handle, CURLMOPT_MAX_HOST_CONNECTIONS, NUM_MAX_HOST_CONNS))
         FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "failed to set max concurrent streams: %s",
                         curl_err_buf);
 
@@ -790,14 +789,14 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
     size_t   handle_index    = 0;
 
     /*
-    Lowers CPU usage dramatically, but also vastly increases time taken for requests to local storage 
+    Lowers CPU usage dramatically, but also vastly increases time taken for requests to local storage
     when the number of datasets is small.
     */
 
     struct timespec delay;
     delay.tv_sec  = 0;
     delay.tv_nsec = DELAY_BETWEEN_HANDLE_CHECKS;
-    
+
     while (num_finished < count) {
         fail_count    = 0;
         succeed_count = 0;
@@ -815,31 +814,30 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
             long response_code;
 
             if (curl_multi_msg->msg == CURLMSG_DONE) {
-                if (CURLE_OK != curl_easy_getinfo(curl_multi_msg->easy_handle, CURLINFO_RESPONSE_CODE,
-                                                    &response_code))
+                if (CURLE_OK !=
+                    curl_easy_getinfo(curl_multi_msg->easy_handle, CURLINFO_RESPONSE_CODE, &response_code))
                     FUNC_GOTO_ERROR(H5E_DATASET, H5E_READERROR, FAIL, "can't get HTTP response code");
 
 #ifdef RV_CONNECTOR_DEBUG
                 printf(" RV_dataset_read to %zu elements received %zu response\n", count, response_code);
 #endif
-                    /* Gracefully handle 503 Error, which can result from sending too many simultaneous
-                     * requests */
-                    if (response_code == 503) {
-                        wait_count++;
-                        /* Identify the handle by its original index in the easy handle array*/
+                /* Gracefully handle 503 Error, which can result from sending too many simultaneous
+                 * requests */
+                if (response_code == 503) {
+                    wait_count++;
+                    /* Identify the handle by its original index in the easy handle array*/
 
-                    if (RV_get_index_of_matching_handle(curl_easy_handles, count,
-                                                        curl_multi_msg->easy_handle, &handle_index) < 0)
+                    if (RV_get_index_of_matching_handle(curl_easy_handles, count, curl_multi_msg->easy_handle,
+                                                        &handle_index) < 0)
                         FUNC_GOTO_ERROR(H5E_DATASET, H5E_READERROR, FAIL,
                                         "can't get handle information for retry");
 
 #ifdef RV_CONNECTOR_DEBUG
                     printf("Read handle %zu failed - waiting %zuns to retry\n", handle_index,
-                            current_backoff_duration[handle_index]);
+                           current_backoff_duration[handle_index]);
 #endif
 
-                    if (CURLM_OK !=
-                        curl_multi_remove_handle(curl_multi_handle, curl_multi_msg->easy_handle))
+                    if (CURLM_OK != curl_multi_remove_handle(curl_multi_handle, curl_multi_msg->easy_handle))
                         FUNC_GOTO_ERROR(H5E_DATASET, H5E_READERROR, FAIL,
                                         "failed to remove denied cURL handle");
 
@@ -857,14 +855,13 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
                     current_backoff_duration[handle_index] =
                         (current_backoff_duration[handle_index] == 0)
                             ? BACKOFF_INITIAL_DURATION
-                            : (size_t)((double)current_backoff_duration[handle_index] *
-                                        BACKOFF_SCALE_FACTOR);
+                            : (size_t)((double)current_backoff_duration[handle_index] * BACKOFF_SCALE_FACTOR);
 
                     /* Randomize time to avoid doing all retry attempts at once */
                     int random_factor = rand();
                     current_backoff_duration[handle_index] =
                         (size_t)((double)current_backoff_duration[handle_index] *
-                                    (1.0 + ((double)random_factor / (double)RAND_MAX)));
+                                 (1.0 + ((double)random_factor / (double)RAND_MAX)));
 
                     if (current_backoff_duration[handle_index] >= BACKOFF_MAX_BEFORE_FAIL)
                         FUNC_GOTO_ERROR(H5E_DATASET, H5E_READERROR, FAIL,
@@ -877,8 +874,8 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
                     num_finished++;
                     succeed_count++;
 
-                    if (RV_get_index_of_matching_handle(curl_easy_handles, count,
-                                                        curl_multi_msg->easy_handle, &handle_index) < 0)
+                    if (RV_get_index_of_matching_handle(curl_easy_handles, count, curl_multi_msg->easy_handle,
+                                                        &handle_index) < 0)
                         FUNC_GOTO_ERROR(H5E_DATASET, H5E_READERROR, FAIL,
                                         "can't get handle information for retry");
 
@@ -887,11 +884,10 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
                         size_t dtype_size;
 
                         if (0 == (dtype_size = H5Tget_size(mem_type_id[handle_index])))
-                            FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL,
-                                            "memory datatype is invalid");
+                            FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_BADVALUE, FAIL, "memory datatype is invalid");
 
                         /* Scatter the read data out to the supplied read buffer according to the
-                            * mem_type_id and mem_space_id given */
+                         * mem_type_id and mem_space_id given */
                         read_data_size = (size_t)file_select_npoints[handle_index] * dtype_size;
                         struct response_read_info resp_info;
                         resp_info.response_buf = &response_buffers[handle_index];
@@ -902,7 +898,7 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
 #endif
 
                         if (H5Dscatter(dataset_read_scatter_op, &resp_info, mem_type_id[handle_index],
-                                        mem_space_id[handle_index], buf[handle_index]) < 0)
+                                       mem_space_id[handle_index], buf[handle_index]) < 0)
                             FUNC_GOTO_ERROR(H5E_DATASET, H5E_READERROR, FAIL,
                                             "can't scatter data to read buffer");
                     }
@@ -910,9 +906,9 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
                         if (H5T_STD_REF_OBJ == mem_type_id[handle_index]) {
                             /* Convert the received binary buffer into a buffer of rest_obj_ref_t's */
                             if (RV_convert_buffer_to_obj_refs(response_buffers[handle_index].buffer,
-                                                                (size_t)file_select_npoints[handle_index],
-                                                                (rv_obj_ref_t **)&obj_ref_buf,
-                                                                &read_data_size) < 0)
+                                                              (size_t)file_select_npoints[handle_index],
+                                                              (rv_obj_ref_t **)&obj_ref_buf,
+                                                              &read_data_size) < 0)
                                 FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_CANTCONVERT, FAIL,
                                                 "can't convert ref string/s to object ref array");
 
@@ -921,8 +917,7 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
                     }
 
                     /* Clean up */
-                    if (CURLM_OK !=
-                        curl_multi_remove_handle(curl_multi_handle, curl_multi_msg->easy_handle))
+                    if (CURLM_OK != curl_multi_remove_handle(curl_multi_handle, curl_multi_msg->easy_handle))
                         FUNC_GOTO_ERROR(H5E_DATASET, H5E_READERROR, FAIL,
                                         "failed to remove finished cURL handle");
 
@@ -946,7 +941,7 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
         } /* while (curl_multi_msg);*/
 
         /* TODO: Replace with an epoll-like structure of some kind, manually iterating this will probably
-            * be slow */
+         * be slow */
         struct timespec curr_time;
         clock_gettime(CLOCK_MONOTONIC, &curr_time);
         size_t curr_time_ns = (size_t)curr_time.tv_sec * 1000 * 1000 * 1000 + (size_t)curr_time.tv_nsec;
@@ -955,8 +950,7 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
             if (failed_handles_to_retry[i] &&
                 ((curr_time_ns - time_of_fail[i]) >= current_backoff_duration[i])) {
                 if (CURLM_OK != curl_multi_add_handle(curl_multi_handle, failed_handles_to_retry[i]))
-                    FUNC_GOTO_ERROR(H5E_DATASET, H5E_READERROR, FAIL,
-                                    "failed to re-add denied cURL handle");
+                    FUNC_GOTO_ERROR(H5E_DATASET, H5E_READERROR, FAIL, "failed to re-add denied cURL handle");
 
                 failed_handles_to_retry[i] = NULL;
             }
@@ -967,7 +961,7 @@ RV_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spac
 
 done:
 
-    //fprintf(stderr, "\nWait count during read: %zu\n", wait_count);
+    // fprintf(stderr, "\nWait count during read: %zu\n", wait_count);
 
     if (obj_ref_buf)
         RV_free(obj_ref_buf);
@@ -1372,7 +1366,7 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
         uinfo_arr[i].buffer      = is_transfer_binary ? buf[i] : write_bodies[i];
         uinfo_arr[i].buffer_size = write_body_len;
         uinfo_arr[i].bytes_sent  = 0;
-        uinfo_arr[i].dset_idx = i;
+        uinfo_arr[i].dset_idx    = i;
 
         total_content_lengths[i] = write_body_len;
 
@@ -1419,24 +1413,23 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
 
     size_t wait_count = 0;
 
-    if (CURLM_OK !=
-        curl_multi_setopt(curl_multi_handle, CURLMOPT_MAX_HOST_CONNECTIONS, NUM_MAX_HOST_CONNS))
+    if (CURLM_OK != curl_multi_setopt(curl_multi_handle, CURLMOPT_MAX_HOST_CONNECTIONS, NUM_MAX_HOST_CONNS))
         FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTSET, FAIL, "failed to set max concurrent streams: %s",
                         curl_err_buf);
 
-    int             still_running   = 0;
-    int             num_curlm_msgs  = 0;
-    int             events_occurred = 0;
-    CURLMsg        *curl_multi_msg  = NULL;
-    size_t          fail_count      = 0;
-    size_t          succeed_count   = 0;
-    size_t          num_finished    = 0;
-    size_t          handle_index    = 0;
+    int      still_running   = 0;
+    int      num_curlm_msgs  = 0;
+    int      events_occurred = 0;
+    CURLMsg *curl_multi_msg  = NULL;
+    size_t   fail_count      = 0;
+    size_t   succeed_count   = 0;
+    size_t   num_finished    = 0;
+    size_t   handle_index    = 0;
 
     struct timespec delay;
     delay.tv_sec  = 0;
     delay.tv_nsec = DELAY_BETWEEN_HANDLE_CHECKS;
-    
+
     if ((failed_handles_to_retry = calloc(count, sizeof(CURL *))) == NULL)
         FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTALLOC, FAIL,
                         "can't allocate space for cURL headers to be retried");
@@ -1468,30 +1461,29 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
             long response_code;
 
             if (curl_multi_msg && (curl_multi_msg->msg == CURLMSG_DONE)) {
-                if (CURLE_OK != curl_easy_getinfo(curl_multi_msg->easy_handle, CURLINFO_RESPONSE_CODE,
-                                                    &response_code))
+                if (CURLE_OK !=
+                    curl_easy_getinfo(curl_multi_msg->easy_handle, CURLINFO_RESPONSE_CODE, &response_code))
                     FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "can't get HTTP response code");
 
 #ifdef RV_CONNECTOR_DEBUG
                 printf(" RV_dataset_write to %zu elements received %zu response\n", count, response_code);
 #endif
 
-                    /* Gracefully handle 503 Error, which can result from sending too many simultaneous
-                     * requests */
-                    if (response_code == 503) {
-                        
-                        wait_count++;
+                /* Gracefully handle 503 Error, which can result from sending too many simultaneous
+                 * requests */
+                if (response_code == 503) {
 
-                    if (RV_get_index_of_matching_handle(curl_easy_handles, count,
-                                                        curl_multi_msg->easy_handle, &handle_index) < 0)
+                    wait_count++;
+
+                    if (RV_get_index_of_matching_handle(curl_easy_handles, count, curl_multi_msg->easy_handle,
+                                                        &handle_index) < 0)
                         FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL,
                                         "can't get handle information for retry");
 
                     /* Restart request next time */
                     uinfo_arr[handle_index].bytes_sent = 0;
 
-                    if (CURLM_OK !=
-                        curl_multi_remove_handle(curl_multi_handle, curl_multi_msg->easy_handle))
+                    if (CURLM_OK != curl_multi_remove_handle(curl_multi_handle, curl_multi_msg->easy_handle))
                         FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL,
                                         "failed to remove denied cURL handle");
 
@@ -1505,25 +1497,24 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
                     time_of_fail[handle_index] =
                         (size_t)tms.tv_sec * 1000 * 1000 * 1000 + (size_t)tms.tv_nsec;
 
-                        if (current_backoff_duration[handle_index] >= BACKOFF_MAX_BEFORE_FAIL)
-                            FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL,
-                                            "Unable to reach server for write: 503 service unavailable");
+                    if (current_backoff_duration[handle_index] >= BACKOFF_MAX_BEFORE_FAIL)
+                        FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL,
+                                        "Unable to reach server for write: 503 service unavailable");
 
-                        current_backoff_duration[handle_index] =
-                            (current_backoff_duration[handle_index] == 0)
-                                ? BACKOFF_INITIAL_DURATION
-                                : (size_t)((double)current_backoff_duration[handle_index] *
-                                           BACKOFF_SCALE_FACTOR);
+                    current_backoff_duration[handle_index] =
+                        (current_backoff_duration[handle_index] == 0)
+                            ? BACKOFF_INITIAL_DURATION
+                            : (size_t)((double)current_backoff_duration[handle_index] * BACKOFF_SCALE_FACTOR);
 
                     /* Randomize time to avoid doing all retry attempts at once */
                     int random_factor = rand();
                     current_backoff_duration[handle_index] =
                         (size_t)((double)current_backoff_duration[handle_index] *
-                                    (1.0 + ((double)random_factor / (double)RAND_MAX)));
+                                 (1.0 + ((double)random_factor / (double)RAND_MAX)));
 
 #ifdef RV_CONNECTOR_DEBUG
                     printf("Write handle %zu failed - waiting %zuns to retry\n", handle_index,
-                            current_backoff_duration[handle_index]);
+                           current_backoff_duration[handle_index]);
 #endif
                     fail_count++;
                 }
@@ -1532,13 +1523,12 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
                     succeed_count++;
                     /* Clean up resources used for the completed handle */
 
-                    if (RV_get_index_of_matching_handle(curl_easy_handles, count,
-                                                        curl_multi_msg->easy_handle, &handle_index) < 0)
+                    if (RV_get_index_of_matching_handle(curl_easy_handles, count, curl_multi_msg->easy_handle,
+                                                        &handle_index) < 0)
                         FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL,
                                         "can't get handle information for retry");
 
-                    if (CURLM_OK !=
-                        curl_multi_remove_handle(curl_multi_handle, curl_multi_msg->easy_handle))
+                    if (CURLM_OK != curl_multi_remove_handle(curl_multi_handle, curl_multi_msg->easy_handle))
                         FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL,
                                         "failed to remove finished cURL handle");
 
@@ -1558,23 +1548,23 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
                     RV_free(response_buffers[handle_index].buffer);
                     response_buffers[handle_index].buffer = NULL;
 
-                        RV_free(curl_err_bufs[handle_index]);
-                        curl_err_bufs[handle_index] = NULL;
-                    }
-                    else {
-                        fprintf(stderr, "Unexpected response from server: HTTP %ld", response_code);
-                        HANDLE_RESPONSE(response_code, H5E_DATASET, H5E_WRITEERROR, FAIL);
-                    }
+                    RV_free(curl_err_bufs[handle_index]);
+                    curl_err_bufs[handle_index] = NULL;
                 }
-            } /* end while (curl_multi_msg); */
+                else {
+                    fprintf(stderr, "Unexpected response from server: HTTP %ld", response_code);
+                    HANDLE_RESPONSE(response_code, H5E_DATASET, H5E_WRITEERROR, FAIL);
+                }
+            }
+        } /* end while (curl_multi_msg); */
 
 #ifdef RV_CONNECTOR_DEBUG
         printf("%zu total complete, %zu handles succeeded this iteration, %zu handles failed%s\n",
-                num_finished, succeed_count, fail_count, (fail_count > 0) ? ", retrying..." : "");
+               num_finished, succeed_count, fail_count, (fail_count > 0) ? ", retrying..." : "");
 #endif
 
         /* TODO: Replace with an epoll-like structure of some kind, manually iterating this will probably
-            * be slow */
+         * be slow */
         struct timespec curr_time;
         clock_gettime(CLOCK_MONOTONIC, &curr_time);
         size_t curr_time_ns = (size_t)curr_time.tv_sec * 1000 * 1000 * 1000 + (size_t)curr_time.tv_nsec;
@@ -1583,8 +1573,7 @@ RV_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t _mem_spa
             if (failed_handles_to_retry[i] &&
                 ((curr_time_ns - time_of_fail[i]) >= current_backoff_duration[i])) {
                 if (CURLM_OK != curl_multi_add_handle(curl_multi_handle, failed_handles_to_retry[i]))
-                    FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL,
-                                    "failed to re-add denied cURL handle");
+                    FUNC_GOTO_ERROR(H5E_DATASET, H5E_WRITEERROR, FAIL, "failed to re-add denied cURL handle");
 
                 failed_handles_to_retry[i] = NULL;
             }
@@ -1598,7 +1587,7 @@ done:
     printf("-> Dataset write response buffer:\n%s\n\n", response_buffer.buffer);
 #endif
 
-    //fprintf(stderr, "\nWait count during write: %zu\n", wait_count);
+    // fprintf(stderr, "\nWait count during write: %zu\n", wait_count);
 
     for (size_t i = 0; i < count; i++) {
         if (curl_headers_arr[i]) {

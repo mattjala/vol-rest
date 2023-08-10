@@ -146,7 +146,8 @@
                 FUNC_GOTO_ERROR(ERR_MAJOR, ERR_MINOR, ret_value, "504 - Gateway timeout");                   \
                 break;                                                                                       \
             default:                                                                                         \
-                FUNC_GOTO_ERROR(ERR_MAJOR, ERR_MINOR, ret_value, "Unknown error occurred - HTTP %d", response_code);                  \
+                FUNC_GOTO_ERROR(ERR_MAJOR, ERR_MINOR, ret_value, "Unknown error occurred - HTTP %d",         \
+                                response_code);                                                              \
                 break;                                                                                       \
         } /* end switch */                                                                                   \
     } while (0)
@@ -458,7 +459,7 @@ extern struct response_buffer response_buffer;
 during a multi read/write */
 extern curl_off_t *total_content_lengths;
 extern curl_off_t *curr_content_transferred;
-extern bool is_read;
+extern bool        is_read;
 /**************************
  *                        *
  *        Typedefs        *
@@ -610,7 +611,6 @@ typedef struct loc_info {
     char        *GCPL_base64;
     RV_object_t *domain;
 } loc_info;
-
 
 /****************************
  *                          *
