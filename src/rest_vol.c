@@ -3318,7 +3318,6 @@ RV_parse_server_version(char *HTTP_response, const void *callback_data_in, void 
 
     char *version_response = NULL;
     char *version_field    = NULL;
-    char *saveptr;
     int   numeric_version_field = 0;
 
 #ifdef RV_CONNECTOR_DEBUG
@@ -3345,7 +3344,7 @@ RV_parse_server_version(char *HTTP_response, const void *callback_data_in, void 
         FUNC_GOTO_ERROR(H5E_OBJECT, H5E_BADVALUE, FAIL, "server version was NULL");
 
     /* Parse server version into struct */
-    if (NULL == (version_field = strtok_r(version_response, ".", &saveptr)))
+    if (NULL == (version_field = strtok(version_response, ".")))
         FUNC_GOTO_ERROR(H5E_OBJECT, H5E_BADVALUE, FAIL, "server major version field was NULL");
 
     if ((numeric_version_field = (int)strtol(version_field, NULL, 10)) < 0)
@@ -3353,7 +3352,7 @@ RV_parse_server_version(char *HTTP_response, const void *callback_data_in, void 
 
     server_version->major = (size_t)numeric_version_field;
 
-    if (NULL == (version_field = strtok_r(NULL, ".", &saveptr)))
+    if (NULL == (version_field = strtok(NULL, ".")))
         FUNC_GOTO_ERROR(H5E_OBJECT, H5E_BADVALUE, FAIL, "server minor version field was NULL");
 
     if ((numeric_version_field = (int)strtol(version_field, NULL, 10)) < 0)
@@ -3361,7 +3360,7 @@ RV_parse_server_version(char *HTTP_response, const void *callback_data_in, void 
 
     server_version->minor = (size_t)numeric_version_field;
 
-    if (NULL == (version_field = strtok_r(NULL, ".", &saveptr)))
+    if (NULL == (version_field = strtok(NULL, ".")))
         FUNC_GOTO_ERROR(H5E_OBJECT, H5E_BADVALUE, FAIL, "server patch version field was NULL");
 
     if ((numeric_version_field = (int)strtol(version_field, NULL, 10)) < 0)
