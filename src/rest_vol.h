@@ -790,6 +790,9 @@ herr_t RV_convert_datatype_to_JSON(hid_t type_id, char **type_body, size_t *type
 /* Helper function to escape control characters for JSON strings */
 herr_t RV_JSON_escape_string(const char *in, char *out, size_t *out_size);
 
+/* Return the current time as microseconds after the UNIX epoch. */
+uint64_t RV_now_usec(void);
+
 #define SERVER_VERSION_MATCHES_OR_EXCEEDS(version, major_needed, minor_needed, patch_needed)                 \
     (version.major > major_needed) || (version.major == major_needed && version.minor > minor_needed) ||     \
         (version.major == major_needed && version.minor == minor_needed && version.patch >= patch_needed)
