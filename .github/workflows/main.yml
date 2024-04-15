@@ -367,6 +367,6 @@ jobs:
               echo "HDF5_VOL_CONNECTOR=REST" >> $GITHUB_ENV
 
       - name: Test REST VOL
-        working-directory: ${{github.workspace}}/vol-rest/install/bin/
+        working-directory: ${{github.workspace}}/vol-rest/install/bin
         run: |
-          test_rest_vol-shared.exe
+          ${{github.workspace}}/vol-rest/install/bin/test_rest_vol-shared.exe
