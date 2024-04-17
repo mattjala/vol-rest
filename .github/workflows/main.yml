@@ -367,6 +367,14 @@ jobs:
               echo "HDF5_VOL_CONNECTOR=REST" >> $GITHUB_ENV
 
       - name: Test REST VOL
+        shell: PowerShell
         working-directory: ${{github.workspace}}/vol-rest/install/bin
         run: |
-          ${{github.workspace}}/vol-rest/install/bin/test_rest_vol-shared.exe
+          ${{github.workspace}}/vol-rest/install/bin/test_rest_vol-shared.exe > results.txt 2>&1
+      
+      - name: Show test results
+        shell: bash
+        working-directory: ${{github.workspace}}/vol-rest/install/bin
+        run: |
+          cat results.txt
+      
