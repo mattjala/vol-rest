@@ -295,6 +295,26 @@ jobs:
         with:
           path: ${{github.workspace}}/vol-rest
       
+      - name: Configure + Build output test
+        working-directory: ${{github.workspace}}/vol-rest
+        run: |
+            dir
+            cd win_output_test
+            mkdir build
+            cd build
+            cmake ..
+        
+      - name: Build output test
+        working-directory: ${{github.workspace}}/vol-rest/win_output_test/build
+        run: |
+          cmake --build . --config Release
+      
+      - name: Run output test
+        shell: PowerShell
+        working-directory: ${{github.workspace}}/vol-rest/win_output_test/build/Release
+        run: |
+          ${{github.workspace}}/vol-rest/win_output_test/build/Release/HelloWorld.exe
+  
       - name: Get curl from source
         uses: actions/checkout@v4
         with:
@@ -373,8 +393,8 @@ jobs:
           ${{github.workspace}}/vol-rest/install/bin/test_rest_vol-shared.exe > results.txt 2>&1
       
       - name: Show test results
-        shell: bash
+        shell: PowerShell
         working-directory: ${{github.workspace}}/vol-rest/install/bin
         run: |
-          cat results.txt
-      
+          more results.txt
+    
