@@ -1470,7 +1470,7 @@ RV_convert_JSON_to_datatype(const char *type)
 {
     yyjson_val *parse_tree = NULL, *key_obj = NULL, *target_tree = NULL;
     yyjson_doc *parse_tree_doc = NULL;
-    hsize_t    *array_dims = NULL;
+    hsize_t    *array_dims     = NULL;
     size_t      i;
     hid_t       datatype                   = FAIL;
     hid_t      *compound_member_type_array = NULL;
@@ -1831,7 +1831,7 @@ RV_convert_JSON_to_datatype(const char *type)
         /* Retrieve the names of all of the members of the Compound Datatype */
         for (i = 0; i < yyjson_arr_size(key_obj); i++) {
             yyjson_val *compound_member_field;
-            size_t   j;
+            size_t      j;
 
             if (NULL == (compound_member_field = yyjson_arr_get(key_obj, i)))
                 FUNC_GOTO_ERROR(H5E_DATATYPE, H5E_PARSEERROR, FAIL,

@@ -1180,7 +1180,7 @@ done:
 herr_t
 RV_get_link_info_callback(char *HTTP_response, const void *callback_data_in, void *callback_data_out)
 {
-    H5L_info2_t *link_info  = (H5L_info2_t *)callback_data_out;
+    H5L_info2_t *link_info      = (H5L_info2_t *)callback_data_out;
     yyjson_val  *parse_tree     = NULL, *key_obj;
     yyjson_doc  *parse_tree_doc = NULL;
     char        *parsed_string;
@@ -1357,7 +1357,7 @@ RV_get_link_val_callback(char *HTTP_response, const void *callback_data_in, void
     }     /* end if */
     else {
         yyjson_val *link_domain_obj;
-        char    *link_domain;
+        char       *link_domain;
 
         if (NULL == (link_domain_obj = RV_json_get(parse_tree, link_domain_keys, RV_JSON_STRING))) {
             if (NULL == (link_domain_obj = RV_json_get(parse_tree, link_domain_keys2, RV_JSON_STRING)))
@@ -1434,7 +1434,7 @@ done:
 herr_t
 RV_get_link_obj_type_callback(char *HTTP_response, const void *callback_data_in, void *callback_data_out)
 {
-    H5I_type_t *obj_type   = (H5I_type_t *)callback_data_out;
+    H5I_type_t *obj_type       = (H5I_type_t *)callback_data_out;
     yyjson_val *parse_tree     = NULL, *key_obj;
     yyjson_doc *parse_tree_doc = NULL;
     char       *parsed_string;
@@ -1734,7 +1734,7 @@ RV_build_link_table(char *HTTP_response, hbool_t is_recursive, int (*sort_func)(
                     link_table_entry **link_table, size_t *num_entries, rv_hash_table_t *visited_link_table,
                     RV_object_t *loc_obj)
 {
-    link_table_entry *table      = NULL;
+    link_table_entry *table          = NULL;
     yyjson_val       *parse_tree     = NULL, *key_obj;
     yyjson_doc       *parse_tree_doc = NULL;
     yyjson_val       *link_obj, *link_field_obj;

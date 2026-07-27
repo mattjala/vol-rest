@@ -1323,7 +1323,7 @@ RV_build_object_table(char *HTTP_response, hbool_t is_recursive, int (*sort_func
                       object_table_entry **object_table, size_t *num_entries,
                       const iter_data *object_iter_data, rv_hash_table_t *visited_link_table)
 {
-    object_table_entry *table      = NULL;
+    object_table_entry *table          = NULL;
     yyjson_val         *parse_tree     = NULL, *key_obj;
     yyjson_doc         *parse_tree_doc = NULL;
     yyjson_val         *link_obj, *link_field_obj;

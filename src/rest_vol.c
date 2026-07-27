@@ -2580,10 +2580,10 @@ done:
 herr_t
 RV_parse_creation_properties_callback(yyjson_val *parse_tree, char **GCPL_buf_out)
 {
-    herr_t   ret_value      = SUCCEED;
+    herr_t      ret_value      = SUCCEED;
     yyjson_val *key_obj        = NULL;
-    char    *parsed_string  = NULL;
-    char    *GCPL_buf_local = NULL;
+    char       *parsed_string  = NULL;
+    char       *GCPL_buf_local = NULL;
 
     if (!GCPL_buf_out)
         FUNC_GOTO_ERROR(H5E_ARGS, H5E_BADVALUE, FAIL, "given GCPL buffer was NULL");
@@ -2636,11 +2636,11 @@ RV_copy_object_loc_info_callback(char *HTTP_response, const void *callback_data_
 {
     yyjson_val          *parse_tree = NULL, *key_obj = NULL, *target_tree = NULL;
     yyjson_doc          *parse_tree_doc = NULL;
-    char                *parsed_string = NULL;
-    const char          *path_name     = NULL;
-    loc_info            *loc_info_out  = (loc_info *)callback_data_out;
-    const server_info_t *server_info   = (const server_info_t *)callback_data_in;
-    herr_t               ret_value     = SUCCEED;
+    char                *parsed_string  = NULL;
+    const char          *path_name      = NULL;
+    loc_info            *loc_info_out   = (loc_info *)callback_data_out;
+    const server_info_t *server_info    = (const server_info_t *)callback_data_in;
+    herr_t               ret_value      = SUCCEED;
 
     char *GCPL_buf = NULL;
 
@@ -3066,8 +3066,8 @@ RV_parse_dataspace(char *space)
     } /* end if */
     else if (!strcmp(dataspace_type, "H5S_SIMPLE")) {
         yyjson_val *dims_obj = NULL, *maxdims_obj = NULL;
-        hbool_t  maxdims_specified = TRUE;
-        size_t   i;
+        hbool_t     maxdims_specified = TRUE;
+        size_t      i;
 
 #ifdef RV_CONNECTOR_DEBUG
         printf("-> SIMPLE dataspace\n\n");
@@ -3672,8 +3672,8 @@ RV_parse_allocated_size_cb(char *HTTP_response, void *callback_data_in, void *ca
 {
     yyjson_val *parse_tree = NULL, *key_obj = NULL;
     yyjson_doc *parse_tree_doc = NULL;
-    herr_t   ret_value      = SUCCEED;
-    size_t  *allocated_size = (size_t *)callback_data_out;
+    herr_t      ret_value      = SUCCEED;
+    size_t     *allocated_size = (size_t *)callback_data_out;
 
 #ifdef RV_CONNECTOR_DEBUG
     printf("-> Retrieving allocated size from server's HTTP response\n\n");
@@ -4618,9 +4618,9 @@ RV_parse_domain_allocated_size_cb(char *HTTP_response, const void *callback_data
 {
     yyjson_val *parse_tree     = NULL, *key_obj;
     yyjson_doc *parse_tree_doc = NULL;
-    char    *parsed_object_string;
-    size_t  *filesize  = (size_t *)callback_data_out;
-    herr_t   ret_value = SUCCEED;
+    char       *parsed_object_string;
+    size_t     *filesize  = (size_t *)callback_data_out;
+    herr_t      ret_value = SUCCEED;
 
 #ifdef RV_CONNECTOR_DEBUG
     printf("-> Retrieving filesize from server's HTTP response\n\n");

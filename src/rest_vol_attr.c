@@ -2378,7 +2378,7 @@ static herr_t
 RV_build_attr_table(char *HTTP_response, hbool_t sort, int (*sort_func)(const void *, const void *),
                     attr_table_entry **attr_table, size_t *num_entries)
 {
-    attr_table_entry *table      = NULL;
+    attr_table_entry *table          = NULL;
     yyjson_val       *parse_tree     = NULL, *key_obj;
     yyjson_doc       *parse_tree_doc = NULL;
     yyjson_val       *attr_obj, *attr_field_obj;

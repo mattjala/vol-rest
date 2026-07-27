@@ -698,10 +698,10 @@ done:
 static herr_t
 RV_get_group_info_callback(char *HTTP_response, const void *callback_data_in, void *callback_data_out)
 {
-    H5G_info_t *group_info = (H5G_info_t *)callback_data_out;
+    H5G_info_t *group_info     = (H5G_info_t *)callback_data_out;
     yyjson_val *parse_tree     = NULL, *key_obj;
     yyjson_doc *parse_tree_doc = NULL;
-    herr_t      ret_value  = SUCCEED;
+    herr_t      ret_value      = SUCCEED;
 
 #ifdef RV_CONNECTOR_DEBUG
     printf("-> Retrieving group's info from server's HTTP response\n\n");

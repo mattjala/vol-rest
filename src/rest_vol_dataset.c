@@ -2031,8 +2031,8 @@ RV_parse_dataset_creation_properties_callback(char *HTTP_response, const void *c
      *                                                                          *
      ****************************************************************************/
     if ((key_obj = RV_json_get(creation_properties_obj, attribute_phase_change_keys, RV_JSON_OBJECT))) {
-        unsigned minDense   = DATASET_CREATE_MIN_DENSE_ATTRIBUTES_DEFAULT;
-        unsigned maxCompact = DATASET_CREATE_MAX_COMPACT_ATTRIBUTES_DEFAULT;
+        unsigned    minDense   = DATASET_CREATE_MIN_DENSE_ATTRIBUTES_DEFAULT;
+        unsigned    maxCompact = DATASET_CREATE_MAX_COMPACT_ATTRIBUTES_DEFAULT;
         yyjson_val *sub_obj;
 
         if (NULL == (sub_obj = RV_json_get(key_obj, max_compact_keys, RV_JSON_NUMBER)))
@@ -2157,8 +2157,8 @@ RV_parse_dataset_creation_properties_callback(char *HTTP_response, const void *c
         for (i = 0; i < yyjson_arr_size(key_obj); i++) {
             yyjson_val *filter_obj = yyjson_arr_get(key_obj, i);
             yyjson_val *filter_field;
-            char     *filter_class;
-            long long filter_ID;
+            char       *filter_class;
+            long long   filter_ID;
 
             if (NULL == (filter_field = RV_json_get(filter_obj, filter_class_keys, RV_JSON_STRING)))
                 FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTGET, FAIL, "retrieval of filter class failed");
@@ -2470,8 +2470,8 @@ RV_parse_dataset_creation_properties_callback(char *HTTP_response, const void *c
      ****************************************************************************/
     if ((key_obj = RV_json_get(creation_properties_obj, layout_keys, RV_JSON_OBJECT))) {
         yyjson_val *sub_obj;
-        size_t   i;
-        char    *layout_class;
+        size_t      i;
+        char       *layout_class;
 
         if (NULL == (sub_obj = RV_json_get(key_obj, layout_class_keys, RV_JSON_STRING)))
             FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTGET, FAIL, "retrieval of layout class property failed");
@@ -2481,7 +2481,7 @@ RV_parse_dataset_creation_properties_callback(char *HTTP_response, const void *c
 
         if (!strcmp(layout_class, "H5D_CHUNKED")) {
             yyjson_val *chunk_dims_obj;
-            hsize_t  chunk_dims[DATASPACE_MAX_RANK];
+            hsize_t     chunk_dims[DATASPACE_MAX_RANK];
 
             if (NULL == (chunk_dims_obj = RV_json_get(key_obj, chunk_dims_keys, RV_JSON_ARRAY)))
                 FUNC_GOTO_ERROR(H5E_DATASET, H5E_CANTGET, FAIL, "retrieval of chunk dimensionality failed");
