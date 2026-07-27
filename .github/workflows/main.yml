@@ -52,7 +52,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install libcurl4-openssl-dev
-          sudo apt-get install libyajl-dev
 
       - name: Get Autotools Dependencies
         if: matrix.build_system == 'autotools'
@@ -294,23 +293,6 @@ jobs:
           cmake --build . --config Release
           cmake --install . --config Release
       
-      - name: Get yajl from source
-        uses: actions/checkout@v4
-        with:
-          repository: lloyd/yajl
-          path: ${{github.workspace}}/yajl
-      
-      - name: Install yajl
-        working-directory: ${{github.workspace}}/yajl
-        run: |
-          mkdir build
-          mkdir install
-          cd build
-          cmake -DCMAKE_INSTALL_PREFIX=${{github.workspace}}/yajl/install `
-          -DCMAKE_BUILD_TYPE=Release ..
-          cmake --build . --config Release
-          cmake --install . --config Release
-  
       - name: CMake Configure + Build HDF5
         run: |
           mkdir build
@@ -336,7 +318,6 @@ jobs:
           -DCMAKE_INSTALL_PREFIX=${{github.workspace}}/vol-rest/install `
           -DCURL_ROOT=${{github.workspace}}/curl/install/ -DCMAKE_C_FLAGS="/DCURL_STATICLIB" `
           -DCURL_USE_STATIC_LIBS=ON `
-          -DYAJL_ROOT=${{github.workspace}}/yajl/install/ `
           -DBUILD_STATIC_LIBS=OFF -DBUILD_SHARED_LIBS=ON `
           -DCMAKE_BUILD_TYPE=Release ..
           cmake --build . -j --config Release
@@ -348,7 +329,7 @@ jobs:
           HDF5_PLUGIN_PATH: ${{github.workspace}}\vol-rest\install\bin
         # Manually append lib to PATH here, since env can change between steps on the runner
         run: |
-          $env:PATH="$env:PATH;${{github.workspace}}\vol-rest\install\bin;${{github.workspace}}\hdf5install\bin;${{github.workspace}}\yajl\install\lib"
+          $env:PATH="$env:PATH;${{github.workspace}}\vol-rest\install\bin;${{github.workspace}}\hdf5install\bin"
           ctest . -C Release -VV --output-on-failure
 
       

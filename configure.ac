@@ -97,9 +97,8 @@ fi
 AC_SUBST([LIB_SUFFIX])
 
 ## -----------------------------------------------------------------------
-## Check to make sure cURL and YAJL are available
+## Check to make sure cURL is available
 AC_SEARCH_LIBS(curl_easy_setopt, curl, [], [AC_ERROR([A working libcurl is required])])
-AC_SEARCH_LIBS(yajl_tree_get, yajl, [], [AC_ERROR([A working libyajl is required])])
 
 
 AC_CANONICAL_HOST
@@ -728,26 +727,6 @@ AC_SUBST([RV_CURL_INSTALL_DIR])
 AC_MSG_RESULT([$RV_CURL_INSTALL_DIR])
 
 ## ----------------------------------------------------------------------
-## Check if the install directory for YAJL should be modified
-##
-AC_MSG_CHECKING([YAJL install directory])
-AC_ARG_WITH([yajl],
-            [AS_HELP_STRING([--with-yajl[=DIR]],
-                            [To specify the top-level directory where YAJL is
-                             installed, if YAJL was not installed to a system
-                             path.])],
-            [RV_YAJL_INSTALL_DIR=$withval])
-
-## Set default
-if test "X-$RV_YAJL_INSTALL_DIR" = X- ; then
-  RV_YAJL_INSTALL_DIR=""
-fi
-
-AM_CONDITIONAL([YAJL_DEFAULT_DIR], [test -z "$RV_YAJL_INSTALL_DIR"])
-
-## Allow this variable to be substituted in other files
-AC_SUBST([RV_YAJL_INSTALL_DIR])
-AC_MSG_RESULT([$RV_YAJL_INSTALL_DIR])
 
 ## ----------------------------------------------------------------------
 ## Check if the REST VOL tests should be built

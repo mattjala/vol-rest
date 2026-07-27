@@ -31,6 +31,7 @@ set (HDF5_VOL_REST_SRCS
     ${HDF5_VOL_REST_SRC_DIR}/rest_vol_object.c
     ${HDF5_VOL_REST_UTIL_DIR}/rest_vol_mem.c
     ${HDF5_VOL_REST_UTIL_DIR}/rest_vol_hash_table.c
+    ${HDF5_VOL_REST_SRC_DIR}/yyjson.c
 )
 
 if (HDF5_VOL_REST_ENABLE_DEBUG)
@@ -47,6 +48,7 @@ set (HDF5_VOL_REST_HDRS
     ${HDF5_VOL_REST_SRC_DIR}/rest_vol_link.h
     ${HDF5_VOL_REST_SRC_DIR}/rest_vol_object.h
     ${HDF5_VOL_REST_SRC_DIR}/rest_vol_public.h
+    ${HDF5_VOL_REST_SRC_DIR}/yyjson.h
     ${HDF5_VOL_REST_UTIL_DIR}/rest_vol_mem.h
     ${HDF5_VOL_REST_UTIL_DIR}/rest_vol_err.h
     ${HDF5_VOL_REST_UTIL_DIR}/rest_vol_hash_table.h

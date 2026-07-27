@@ -91,7 +91,6 @@ set (HDF5_VOL_REST_TEST_LIBSH_TARGET   "${HDF5_VOL_REST_TEST_LIB_CORENAME}-share
 #-----------------------------------------------------------------------------
 set (HDF5_VOL_REST_RESOURCES_DIR       ${HDF5_VOL_REST_SOURCE_DIR}/config/cmake)
 set (HDF5_VOL_REST_RESOURCES_EXT_DIR   ${HDF5_VOL_REST_SOURCE_DIR}/config/cmake_ext_mod)
-set (HDF5_VOL_REST_RESOURCES_MOD_DIR   ${HDF5_VOL_REST_SOURCE_DIR}/config/cmake/modules)
 set (HDF5_VOL_REST_SRC_DIR             ${HDF5_VOL_REST_SOURCE_DIR}/src)
 set (HDF5_VOL_REST_UTIL_DIR            ${HDF5_VOL_REST_SOURCE_DIR}/src/util)
 set (HDF5_VOL_REST_TEST_SRC_DIR        ${HDF5_VOL_REST_SOURCE_DIR}/test)
@@ -100,7 +99,7 @@ set (HDF5_DIR_NAME                     "hdf5")
 set (HDF5_HL_DIR_NAME                  "hl")
 
 #-----------------------------------------------------------------------------
-# Find HDF5, cURL and YAJL before building
+# Find HDF5 and cURL before building
 #-----------------------------------------------------------------------------
 if (NOT HDF5_VOL_REST_PACKAGE_SOURCE)
   if (HDF5_FOUND STREQUAL "")
@@ -126,17 +125,6 @@ if (NOT HDF5_VOL_REST_PACKAGE_SOURCE)
     set (LINK_LIBS ${LINK_LIBS} CURL::libcurl)
   else ()
     message (FATAL_ERROR "cURL not found; please check CURL_ROOT")
-  endif ()
-
-  # Include custom module for finding YAJL
-  set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${HDF5_VOL_REST_RESOURCES_MOD_DIR}")
-
-  find_package (YAJL 2.0.4 REQUIRED)
-  if (YAJL_FOUND)
-    include_directories(${YAJL_INCLUDE_DIRS})
-    set (LINK_LIBS ${LINK_LIBS} yajl)
-  else ()
-    message (FATAL_ERROR "YAJL not found; please check YAJL_INCLUDE_DIR")
   endif ()
 endif ()
 
