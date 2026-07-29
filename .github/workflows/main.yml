@@ -32,13 +32,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-latest]
-        build_system: ["autotools", "cmake"]
         python-version: ["3.10"]
         hdf5-branch: ["hdf5_1_14", "develop"]
-        exclude:
-          # hdf5 2.0.0+ does not support autotools
-          - hdf5-branch: "develop"
-            build_system: "autotools"
 
     runs-on: ${{matrix.os}}
     steps:
@@ -53,19 +48,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install libcurl4-openssl-dev
 
-      - name: Get Autotools Dependencies
-        if: matrix.build_system == 'autotools'
-        run: |
-          sudo apt update
-          sudo apt install automake autoconf libtool libtool-bin
-            
       - name: Get REST VOL
         uses: actions/checkout@v4
         with:
           path: ${{github.workspace}}/vol-rest
 
-      - name: CMake Configure + Build HDF5
-        if: matrix.build_system == 'cmake'
+      - name: Configure + Build HDF5
         run: |
           mkdir ${{github.workspace}}/hdf5/build
           cd ./build
@@ -76,25 +64,12 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_INSTALL_PREFIX=${{github.workspace}}/hdf5install \
           ..
-          make 
+          make
           make install
         shell: bash
         working-directory: ${{github.workspace}}/hdf5
 
-      - name: Autotools Configure + Build HDF5  
-        if: matrix.build_system == 'autotools'      
-        run: |
-          ./autogen.sh
-          ./configure --prefix=${{github.workspace}}/hdf5install \
-          --enable-hl --disable-threadsafe \
-          --enable-build-mode=production --enable-shared
-          make 
-          make install
-        shell: bash
-        working-directory: ${{github.workspace}}/hdf5
-
-      - name: CMake Configure REST VOL
-        if: matrix.build_system == 'cmake'
+      - name: Configure REST VOL
         run: |
           mkdir ./build
           cd ./build
@@ -104,27 +79,7 @@ jobs:
         shell: bash
         working-directory: ${{github.workspace}}/vol-rest
 
-      - name: Autotools Configure REST VOL
-        if: matrix.build_system == 'autotools'
-        run: |
-          ./autogen.sh
-          mkdir ${{github.workspace}}/vol-rest/install
-          CFLAGS="-D_POSIX_C_SOURCE=200809L" ./configure \
-          --prefix=${{github.workspace}}/vol-rest/install \
-          --with-hdf5=${{github.workspace}}/hdf5install
-        shell: bash
-        working-directory: ${{github.workspace}}/vol-rest
-
-      - name: Build + Install REST VOL (Autotools)
-        if: matrix.build_system == 'autotools'
-        run: |
-          make -j
-          make install
-        shell: bash
-        working-directory: ${{github.workspace}}/vol-rest/
-
-      - name: Build + Install REST VOL (CMake)
-        if: matrix.build_system == 'cmake'
+      - name: Build + Install REST VOL
         run: |
           make -j
           make install
@@ -183,16 +138,7 @@ jobs:
               python tests/integ/setup_test.py
         working-directory: ${{github.workspace}}/hsds
 
-      - name: Test REST VOL (Autotools)
-        if: matrix.build_system == 'autotools'
-        working-directory: ${{github.workspace}}/vol-rest/
-        env:
-          HDF5_PLUGIN_PATH: ${{github.workspace}}/vol-rest/install/lib
-        run: |
-               ./test/test_rest_vol
-
-      - name: Test REST VOL (CMake)
-        if: matrix.build_system == 'cmake'
+      - name: Test REST VOL
         working-directory: ${{github.workspace}}/vol-rest/build/
         env:
           HDF5_PLUGIN_PATH: ${{github.workspace}}/vol-rest/install/lib

@@ -244,8 +244,6 @@ if (NOT HDF5_VOL_REST_NO_PACKAGES)
     # IDE files
     "/\\\\.vscode/"
     "/\\\\.settings/"
-    "/\\\\.autotools$"
-    "/\\\\.autotools$"
     "/\\\\.project$"
     "/\\\\.cproject$"
 
