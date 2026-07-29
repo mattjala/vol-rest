@@ -26,7 +26,7 @@
 #include <time.h>
 
 #include <curl/curl.h>
-#include "yyjson.h"
+#include <yyjson.h>
 
 /*-------------------------------------------------------------------------
  * JSON parsing helpers (yyjson-backed)

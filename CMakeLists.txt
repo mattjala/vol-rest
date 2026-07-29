@@ -126,6 +126,43 @@ if (NOT HDF5_VOL_REST_PACKAGE_SOURCE)
   else ()
     message (FATAL_ERROR "cURL not found; please check CURL_ROOT")
   endif ()
+
+  #---------------------------------------------------------------------------
+  # yyjson (JSON parsing): use an installed copy if one is available,
+  # otherwise fetch and build a pinned version with FetchContent.
+  #---------------------------------------------------------------------------
+  set (HDF5_VOL_REST_YYJSON_VERSION "0.12.0")
+
+  find_package (yyjson ${HDF5_VOL_REST_YYJSON_VERSION} QUIET)
+
+  if (yyjson_FOUND)
+    message (STATUS "Found yyjson: ${yyjson_VERSION}")
+    set (HDF5_VOL_REST_YYJSON_TARGET yyjson::yyjson)
+  else ()
+    message (STATUS "yyjson not found; fetching v${HDF5_VOL_REST_YYJSON_VERSION} with FetchContent")
+    include (FetchContent)
+    FetchContent_Declare (yyjson
+        GIT_REPOSITORY https://github.com/ibireme/yyjson.git
+        GIT_TAG        ${HDF5_VOL_REST_YYJSON_VERSION}
+    )
+    # Build the fetched copy as a static, position-independent library with no
+    # tests or install rules, so it is absorbed into the connector and adds no
+    # extra runtime artifact.
+    set (YYJSON_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set (YYJSON_INSTALL OFF CACHE BOOL "" FORCE)
+    set (_HDF5_VOL_REST_SAVED_BUILD_SHARED_LIBS "${BUILD_SHARED_LIBS}")
+    set (BUILD_SHARED_LIBS OFF)
+    set (CMAKE_POSITION_INDEPENDENT_CODE ON)
+    FetchContent_MakeAvailable (yyjson)
+    set (BUILD_SHARED_LIBS "${_HDF5_VOL_REST_SAVED_BUILD_SHARED_LIBS}")
+    # FetchContent exposes the plain 'yyjson' target; the namespaced alias is
+    # only created by yyjson's install/export path.
+    set (HDF5_VOL_REST_YYJSON_TARGET yyjson)
+  endif ()
+  # yyjson is linked directly onto the connector targets (PRIVATE, build
+  # interface only) in src/CMakeLists.txt -- it is an internal implementation
+  # detail, so it is deliberately kept out of LINK_LIBS (and the pkg-config
+  # -l list) and out of the installed export interface.
 endif ()
 
 #-----------------------------------------------------------------------------

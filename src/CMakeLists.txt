@@ -31,7 +31,6 @@ set (HDF5_VOL_REST_SRCS
     ${HDF5_VOL_REST_SRC_DIR}/rest_vol_object.c
     ${HDF5_VOL_REST_UTIL_DIR}/rest_vol_mem.c
     ${HDF5_VOL_REST_UTIL_DIR}/rest_vol_hash_table.c
-    ${HDF5_VOL_REST_SRC_DIR}/yyjson.c
 )
 
 if (HDF5_VOL_REST_ENABLE_DEBUG)
@@ -48,7 +47,6 @@ set (HDF5_VOL_REST_HDRS
     ${HDF5_VOL_REST_SRC_DIR}/rest_vol_link.h
     ${HDF5_VOL_REST_SRC_DIR}/rest_vol_object.h
     ${HDF5_VOL_REST_SRC_DIR}/rest_vol_public.h
-    ${HDF5_VOL_REST_SRC_DIR}/yyjson.h
     ${HDF5_VOL_REST_UTIL_DIR}/rest_vol_mem.h
     ${HDF5_VOL_REST_UTIL_DIR}/rest_vol_err.h
     ${HDF5_VOL_REST_UTIL_DIR}/rest_vol_hash_table.h
@@ -69,6 +67,7 @@ if (BUILD_STATIC_LIBS)
   add_library (${HDF5_VOL_REST_LIB_TARGET} STATIC ${HDF5_VOL_REST_SRCS} ${HDF5_VOL_REST_HDRS})
   RV_TARGET_C_PROPERTIES (${HDF5_VOL_REST_LIB_TARGET} STATIC " " " ")
   target_link_libraries (${HDF5_VOL_REST_LIB_TARGET} PUBLIC ${LINK_LIBS})
+  target_link_libraries (${HDF5_VOL_REST_LIB_TARGET} PRIVATE $<BUILD_INTERFACE:${HDF5_VOL_REST_YYJSON_TARGET}>)
 
   if (NOT WIN32)
     target_link_libraries (${HDF5_VOL_REST_LIB_TARGET} PRIVATE dl)
@@ -95,6 +94,7 @@ if (BUILD_SHARED_LIBS)
   add_library (${HDF5_VOL_REST_LIBSH_TARGET} SHARED ${HDF5_VOL_REST_SRCS} ${HDF5_VOL_REST_HDRS})
   RV_TARGET_C_PROPERTIES (${HDF5_VOL_REST_LIBSH_TARGET} SHARED " " " ")
   target_link_libraries (${HDF5_VOL_REST_LIBSH_TARGET} PUBLIC ${LINK_SHARED_LIBS})
+  target_link_libraries (${HDF5_VOL_REST_LIBSH_TARGET} PRIVATE $<BUILD_INTERFACE:${HDF5_VOL_REST_YYJSON_TARGET}>)
   if (NOT WIN32)
     target_link_libraries (${HDF5_VOL_REST_LIBSH_TARGET} PRIVATE dl)
   endif ()
