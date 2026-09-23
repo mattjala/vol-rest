@@ -32,7 +32,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-latest]
-        python-version: ["3.10"]
+        python-version: ["3.12"]
         hdf5-branch: ["hdf5_1_14", "develop"]
 
     runs-on: ${{matrix.os}}
@@ -115,11 +115,6 @@ jobs:
           cd ${{github.workspace}}/hsds
           pytest
 
-      # Requests 2.32.0 breaks requests-unixsocket, used by HSDS for socket connections
-      - name: Fix requests version
-        run: |
-          pip install requests==2.31.0
-
       - name: Start HSDS
         run: | 
               cd ${{github.workspace}}/hsds
@@ -162,7 +157,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest]
-        python-version: ["3.10"]
+        python-version: ["3.12"]
         hdf5-branch: ["hdf5_1_14", "develop"] 
     env:
       HSDS_ENDPOINT: http://127.0.0.1:5101
